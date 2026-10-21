@@ -1,0 +1,6 @@
+{
+  "name": "RPi 3.5\" SPI Display Camera Streamer",
+  "description": "Python camera streaming script, hardware deployment toolkit, and interactive 480x320 RGB565 SPI display simulator for Raspberry Pi 3.5-inch LCDs.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
