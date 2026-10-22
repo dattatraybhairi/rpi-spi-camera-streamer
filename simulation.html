@@ -12,11 +12,8 @@
         --text: #f8fafc;
         --muted: #94a3b8;
         --accent: #0ea5e9;
-        --green: #22c55e;
       }
-      * {
-        box-sizing: border-box;
-      }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -32,25 +29,16 @@
         gap: 24px;
       }
       @media (max-width: 920px) {
-        .container {
-          grid-template-columns: 1fr;
-        }
+        .container { grid-template-columns: 1fr; }
       }
       .card {
-        background: rgba(30, 41, 59, 0.75);
+        background: rgba(30, 41, 59, 0.85);
         border: 1px solid var(--border);
         border-radius: 12px;
         padding: 20px;
       }
-      h1 {
-        font-size: 20px;
-        margin: 0 0 6px 0;
-      }
-      p.sub {
-        margin: 0 0 16px 0;
-        font-size: 13px;
-        color: var(--muted);
-      }
+      h1 { font-size: 19px; margin: 0 0 6px 0; }
+      p.sub { margin: 0 0 14px 0; font-size: 13px; color: var(--muted); }
       .lcd-bezel {
         background: #020617;
         border: 2px solid #475569;
@@ -80,9 +68,7 @@
         font-weight: 600;
         cursor: pointer;
       }
-      button:hover {
-        border-color: var(--accent);
-      }
+      button:hover { border-color: var(--accent); }
       button.active {
         background: var(--accent);
         border-color: var(--accent);
@@ -107,13 +93,14 @@
   <body>
     <div class="container">
       <div class="card">
-        <h1>3.5" SPI Display (480×320 RGB565) — Hand &amp; Palm Simulator</h1>
+        <h1>3.5" SPI Display (480×320 RGB565) — Live Camera &amp; Palm Simulator</h1>
         <p class="sub">
-          Simulates 21-point MediaPipe hand skeleton, finger states (1, 2, 3, 4, 5, Closed Hand, Thumb OK, OK Sign), and Web Speech voice output.
+          Click "Start Live Webcam Recognition" to detect your real hand via MediaPipe HandLandmarker, or click any preset button below.
         </p>
 
         <div class="lcd-bezel">
           <canvas id="spiCanvas" width="480" height="320"></canvas>
+          <video id="webcamVideo" style="display:none" playsinline muted></video>
         </div>
 
         <div class="preset-grid" id="presetButtons"></div>
@@ -122,19 +109,20 @@
       <div class="card">
         <h1>Live Palm Reader Telemetry &amp; Speech Announcer</h1>
         <p class="sub">
-          Select any hand gesture preset on the left (or toggle Auto-Cycle) to inspect the 21 landmarks and hear the spoken readout.
+          Real-time 21-point hand landmark classification (1, 2, 3, 4, 5, Closed Hand, Thumb OK, OK Sign) with Web Speech TTS.
         </p>
 
-        <div style="display: flex; gap: 10px; margin-bottom: 14px">
+        <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px">
+          <button id="camBtn" onclick="toggleWebcam()">Start Live Webcam Recognition</button>
           <button id="ttsBtn" class="active" onclick="toggleTts()">Voice TTS: ON</button>
-          <button id="autoBtn" onclick="toggleAuto()">Auto-Cycle Gestures: OFF</button>
+          <button id="autoBtn" onclick="toggleAuto()">Auto-Cycle Presets: OFF</button>
         </div>
 
         <div class="telemetry">
           <div class="stat-box">
             <div style="color: #94a3b8">RECOGNIZED GESTURE</div>
             <div id="gestureLabel" style="font-size: 16px; color: #4ade80; font-weight: bold; margin-top: 4px">
-              5 - OPEN PALM
+              5 - OPEN PALM (ALL 5)
             </div>
           </div>
           <div class="stat-box">
@@ -148,14 +136,16 @@
             <div id="fingerMask" style="font-size: 14px; margin-top: 4px">[1, 1, 1, 1, 1] (5/5 UP)</div>
           </div>
           <div class="stat-box">
-            <div style="color: #94a3b8">SPI BUS STREAM</div>
-            <div style="font-size: 14px; margin-top: 4px">/dev/fb1 · 32MHz · 30.0 FPS</div>
+            <div style="color: #94a3b8">RECOGNITION SOURCE</div>
+            <div id="sourceLabel" style="font-size: 14px; margin-top: 4px">Synthetic Preset Mode</div>
           </div>
         </div>
       </div>
     </div>
 
-    <script>
+    <script type="module">
+      import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18";
+
       const GESTURES = [
         { id: 'CLOSED_HAND', btn: 'Closed (0)', title: 'CLOSED HAND (FIST - 0)', spoken: 'Closed Hand', fingers: [0, 0, 0, 0, 0] },
         { id: '1', btn: '1 Finger', title: '1 - ONE FINGER', spoken: 'One', fingers: [0, 1, 0, 0, 0] },
@@ -171,6 +161,10 @@
       let ttsEnabled = true;
       let autoCycle = false;
       let autoTimer = null;
+      let useWebcam = false;
+      let handLandmarker = null;
+      let lastSpoken = { text: '', time: 0 };
+      const video = document.getElementById('webcamVideo');
 
       const btnContainer = document.getElementById('presetButtons');
       GESTURES.forEach((g) => {
@@ -178,52 +172,115 @@
         b.textContent = g.btn;
         b.id = 'btn-' + g.id;
         if (g.id === currentGesture.id) b.classList.add('active');
-        b.onclick = () => selectGesture(g);
+        b.onclick = () => selectGesture(g, false);
         btnContainer.appendChild(b);
       });
 
-      function speak(text) {
+      function speak(text, cooldown = false) {
         if (!ttsEnabled || !('speechSynthesis' in window)) return;
+        const now = performance.now();
+        if (cooldown && lastSpoken.text === text && now - lastSpoken.time < 1900) return;
+        lastSpoken = { text, time: now };
         window.speechSynthesis.cancel();
         const u = new SpeechSynthesisUtterance(text);
         u.rate = 1.05;
         window.speechSynthesis.speak(u);
       }
 
-      function selectGesture(g) {
+      function selectGesture(g, cooldown = false) {
         currentGesture = g;
         GESTURES.forEach((item) => {
-          document.getElementById('btn-' + item.id).classList.toggle('active', item.id === g.id);
+          const el = document.getElementById('btn-' + item.id);
+          if (el) el.classList.toggle('active', item.id === g.id);
         });
         document.getElementById('gestureLabel').textContent = g.title;
         document.getElementById('spokenLabel').textContent = '"' + g.spoken + '"';
         const count = g.fingers.reduce((a, b) => a + b, 0);
         document.getElementById('fingerMask').textContent =
           '[' + g.fingers.join(', ') + '] (' + count + '/5 UP)';
-        speak(g.spoken);
+        speak(g.spoken, cooldown);
       }
 
-      function toggleTts() {
+      window.toggleTts = () => {
         ttsEnabled = !ttsEnabled;
         const b = document.getElementById('ttsBtn');
         b.textContent = 'Voice TTS: ' + (ttsEnabled ? 'ON' : 'OFF');
         b.classList.toggle('active', ttsEnabled);
-      }
+      };
 
-      function toggleAuto() {
+      window.toggleAuto = () => {
         autoCycle = !autoCycle;
         const b = document.getElementById('autoBtn');
-        b.textContent = 'Auto-Cycle Gestures: ' + (autoCycle ? 'ON' : 'OFF');
+        b.textContent = 'Auto-Cycle Presets: ' + (autoCycle ? 'ON' : 'OFF');
         b.classList.toggle('active', autoCycle);
         if (autoCycle) {
           let idx = 0;
           autoTimer = setInterval(() => {
             idx = (idx + 1) % GESTURES.length;
-            selectGesture(GESTURES[idx]);
+            selectGesture(GESTURES[idx], false);
           }, 2200);
         } else if (autoTimer) {
           clearInterval(autoTimer);
         }
+      };
+
+      window.toggleWebcam = async () => {
+        const btn = document.getElementById('camBtn');
+        if (!useWebcam) {
+          btn.textContent = 'Loading HandLandmarker...';
+          try {
+            if (!handLandmarker) {
+              const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm"
+              );
+              handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                  modelAssetPath:
+                    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                  delegate: "GPU"
+                },
+                runningMode: "VIDEO",
+                numHands: 1
+              });
+            }
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 480, height: 320 } });
+            video.srcObject = stream;
+            await video.play();
+            useWebcam = true;
+            btn.textContent = 'Stop Live Webcam';
+            btn.classList.add('active');
+            document.getElementById('sourceLabel').textContent = 'Live Webcam + MediaPipe HandLandmarker';
+          } catch (err) {
+            btn.textContent = 'Start Live Webcam Recognition';
+            document.getElementById('sourceLabel').textContent = 'Camera error: ' + err.message;
+          }
+        } else {
+          useWebcam = false;
+          if (video.srcObject) {
+            video.srcObject.getTracks().forEach((t) => t.stop());
+            video.srcObject = null;
+          }
+          btn.textContent = 'Start Live Webcam Recognition';
+          btn.classList.remove('active');
+          document.getElementById('sourceLabel').textContent = 'Synthetic Preset Mode';
+        }
+      };
+
+      function classifyLandmarks(lms) {
+        const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+        const iUp = lms[8].y < lms[6].y - 0.015 ? 1 : 0;
+        const mUp = lms[12].y < lms[10].y - 0.015 ? 1 : 0;
+        const rUp = lms[16].y < lms[14].y - 0.015 ? 1 : 0;
+        const pUp = lms[20].y < lms[18].y - 0.015 ? 1 : 0;
+        const tUp = dist(lms[4], lms[17]) > dist(lms[3], lms[17]) + 0.032 ? 1 : 0;
+        const fingers = [tUp, iUp, mUp, rUp, pUp];
+        const total = fingers.reduce((a, b) => a + b, 0);
+        const palmScale = Math.max(dist(lms[0], lms[9]), 0.05);
+        if (dist(lms[4], lms[8]) / palmScale < 0.36 && mUp && rUp && pUp) return { ...GESTURES[7], fingers };
+        if (tUp && (iUp + mUp + rUp + pUp) === 0) return { ...GESTURES[6], fingers };
+        if (total === 0) return { ...GESTURES[0], fingers };
+        if (total >= 1 && total <= 5) return { ...GESTURES[total], fingers };
+        return { ...GESTURES[5], fingers };
       }
 
       const canvas = document.getElementById('spiCanvas');
@@ -236,66 +293,58 @@
         ctx.fillStyle = '#090d16';
         ctx.fillRect(0, 0, w, h);
 
-        const cx = w * 0.5 + Math.sin(now * 0.002) * 8;
-        const cy = h * 0.62 + Math.cos(now * 0.002) * 5;
-        const wrist = [cx, cy + 58];
-        const mcps = [
-          [cx - 48, cy + 18],
-          [cx - 28, cy - 18],
-          [cx - 8, cy - 24],
-          [cx + 14, cy - 20],
-          [cx + 34, cy - 10]
-        ];
-
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 2;
-        mcps.forEach((mcp, i) => {
-          ctx.beginPath();
-          ctx.moveTo(wrist[0], wrist[1]);
-          ctx.lineTo(mcp[0], mcp[1]);
-          ctx.stroke();
-
-          const isUp = currentGesture.fingers[i] === 1;
-          let tipX = mcp[0] + (i === 0 ? (isUp ? -36 : -8) : (i - 2) * 6);
-          let tipY = mcp[1] + (isUp ? -65 : 18);
-          if (currentGesture.pinch && (i === 0 || i === 1)) {
-            tipX = cx - 32;
-            tipY = cy - 42;
+        let realLms = null;
+        if (useWebcam && video.readyState >= 2) {
+          ctx.drawImage(video, 0, 0, w, h);
+          if (handLandmarker) {
+            const res = handLandmarker.detectForVideo(video, now);
+            if (res.landmarks && res.landmarks.length > 0) {
+              realLms = res.landmarks[0];
+              const g = classifyLandmarks(realLms);
+              selectGesture(g, true);
+            }
           }
+        }
 
-          ctx.beginPath();
-          ctx.moveTo(mcp[0], mcp[1]);
-          ctx.lineTo(tipX, tipY);
-          ctx.stroke();
+        if (realLms) {
+          const pts = realLms.map((lm) => [lm.x * w, lm.y * h]);
+          const conns = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 2;
+          conns.forEach(([a, b]) => {
+            ctx.beginPath(); ctx.moveTo(pts[a][0], pts[a][1]); ctx.lineTo(pts[b][0], pts[b][1]); ctx.stroke();
+          });
+          pts.forEach((p, idx) => {
+            ctx.fillStyle = [4,8,12,16,20].includes(idx) ? '#4ade80' : '#f8fafc';
+            ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, Math.PI * 2); ctx.fill();
+          });
+        } else if (!useWebcam) {
+          const cx = w * 0.5 + Math.sin(now * 0.002) * 8;
+          const cy = h * 0.62 + Math.cos(now * 0.002) * 5;
+          const wrist = [cx, cy + 58];
+          const mcps = [[cx - 48, cy + 18], [cx - 28, cy - 18], [cx - 8, cy - 24], [cx + 14, cy - 20], [cx + 34, cy - 10]];
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 2;
+          mcps.forEach((mcp, i) => {
+            ctx.beginPath(); ctx.moveTo(wrist[0], wrist[1]); ctx.lineTo(mcp[0], mcp[1]); ctx.stroke();
+            const isUp = currentGesture.fingers[i] === 1;
+            let tipX = mcp[0] + (i === 0 ? (isUp ? -36 : -8) : (i - 2) * 6);
+            let tipY = mcp[1] + (isUp ? -65 : 18);
+            if (currentGesture.pinch && (i === 0 || i === 1)) { tipX = cx - 32; tipY = cy - 42; }
+            ctx.beginPath(); ctx.moveTo(mcp[0], mcp[1]); ctx.lineTo(tipX, tipY); ctx.stroke();
+            ctx.fillStyle = isUp ? '#4ade80' : '#f43f5e';
+            ctx.beginPath(); ctx.arc(tipX, tipY, 6, 0, Math.PI * 2); ctx.fill();
+          });
+          ctx.strokeStyle = '#facc15';
+          ctx.beginPath(); ctx.arc(cx - 4, cy + 6, 18, 0, Math.PI * 2); ctx.stroke();
+        }
 
-          ctx.fillStyle = '#f8fafc';
-          ctx.beginPath();
-          ctx.arc(mcp[0], mcp[1], 4, 0, Math.PI * 2);
-          ctx.fill();
-
-          ctx.fillStyle = isUp ? '#4ade80' : '#f43f5e';
-          ctx.beginPath();
-          ctx.arc(tipX, tipY, 6, 0, Math.PI * 2);
-          ctx.fill();
-        });
-
-        // Palm center circle
-        ctx.strokeStyle = '#facc15';
-        ctx.beginPath();
-        ctx.arc(cx - 4, cy + 6, 18, 0, Math.PI * 2);
-        ctx.stroke();
-
-        // Top & bottom HUD bars
         ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
         ctx.fillRect(0, 0, w, 26);
         ctx.fillRect(0, h - 34, w, 34);
-
         ctx.fillStyle = '#f8fafc';
         ctx.font = '12px monospace';
         ctx.fillText('SPI 3.5" 480x320 RGB565 | /dev/fb1', 8, 17);
-        ctx.fillStyle = '#4ade80';
-        ctx.fillText('30.0 FPS | PALM LOCKED', w - 165, 17);
-
         ctx.fillStyle = '#4ade80';
         ctx.font = 'bold 14px monospace';
         ctx.fillText('PALM READER: ' + currentGesture.title, 10, h - 12);

@@ -4,21 +4,25 @@ RPi 3.5" SPI LCD Camera Streamer + Hand Gesture & Palm Reader
 -------------------------------------------------------------
 Streams live camera frames from Raspberry Pi CSI Camera (Picamera2) or USB V4L2
 Webcam (OpenCV) directly to a 3.5-inch 480x320 SPI LCD Display with real-time
-21-point MediaPipe Hand Landmark tracking, finger counting, and optional speech
-synthesis (pyttsx3 / espeak).
+Hand Landmark / Palm tracking, finger counting, and optional speech synthesis.
+
+Supports 3 Hand & Palm Recognition Backends (Auto-Negotiated, Never Crashes):
+  1. MediaPipe Legacy Solutions API (`mp.solutions.hands`) if available
+  2. MediaPipe Tasks Vision API (`mediapipe.tasks.python.vision.HandLandmarker`)
+     on Python 3.12 / Raspberry Pi OS Bookworm (`hand_landmarker.task` auto-downloaded)
+  3. OpenCV YCrCb Skin-Contour & Convexity-Defect Palm/Finger Classifier fallback
+     (works 100% offline with zero MediaPipe dependencies!)
 
 Recognized Hand & Palm Gestures:
-  - 0 / FIST        : Closed Hand / Fist (0 fingers extended)
-  - 1 / ONE         : Index Finger Up ("1")
-  - 2 / TWO         : Index + Middle Fingers Up ("2" / Peace)
-  - 3 / THREE       : Index + Middle + Ring Fingers Up ("3")
-  - 4 / FOUR        : Four Fingers Up, Thumb tucked ("4")
-  - 5 / FIVE        : Open Palm, All 5 Fingers Up ("5")
-  - THUMBS_UP       : Thumb extended upward, other 4 fingers closed
-  - THUMBS_DOWN     : Thumb extended downward, other 4 fingers closed
-  - OK_SIGN         : Thumb tip touching Index tip (pinch circle) + 3 fingers up
-  - ROCK_ON         : Index + Pinky extended
-  - CALL_ME         : Thumb + Pinky extended
+  - CLOSED_HAND (0) : Closed Hand / Fist (0 fingers extended) -> speaks "Closed Hand"
+  - 1               : Index Finger Up -> speaks "One"
+  - 2               : Index + Middle Fingers Up -> speaks "Two"
+  - 3               : Three Fingers Up -> speaks "Three"
+  - 4               : Four Fingers Up (Thumb curled) -> speaks "Four"
+  - 5               : Open Palm (All 5 Fingers Up) -> speaks "Five"
+  - THUMB_UP        : Thumb extended upward, 4 fingers closed -> speaks "Thumb OK"
+  - OK              : Thumb tip + Index tip pinched in circle -> speaks "OK"
+  - ROCK / CALL_ME  : Index+Pinky ("Rock On") / Thumb+Pinky ("Call Me")
 
 Usage on Raspberry Pi:
   python3 rpi_camera_spi_stream.py --mode fb --fb-dev /dev/fb1 --gesture --tts --hud
@@ -32,6 +36,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -54,16 +59,36 @@ try:
 except ImportError:
     HAS_RAW_SPI = False
 
-# Optional MediaPipe for 21-point Hand Landmark & Palm Reading
+# Optional MediaPipe (supports both legacy mp.solutions.hands AND new mp.tasks.vision)
+MP_SOLUTIONS_HANDS = None
+MP_TASKS_VISION = None
+MP_IMAGE_CLS = None
+MP_BASE_OPTIONS = None
+
 try:
     import mediapipe as mp
-    HAS_MEDIAPIPE = True
+    if hasattr(mp, "solutions") and hasattr(mp.solutions, "hands"):
+        MP_SOLUTIONS_HANDS = mp.solutions.hands
+    else:
+        try:
+            from mediapipe.tasks import python as mp_python
+            from mediapipe.tasks.python import vision as mp_vision
+            MP_TASKS_VISION = mp_vision
+            MP_IMAGE_CLS = mp.Image
+            MP_BASE_OPTIONS = mp_python.BaseOptions
+        except Exception:
+            pass
 except ImportError:
-    HAS_MEDIAPIPE = False
+    mp = None
+
+
+HAND_LANDMARKER_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+)
 
 
 class SpeechAnnouncer:
-    """Non-blocking voice announcer for detected hand gestures (espeak-ng / pyttsx3)."""
+    """Non-blocking voice announcer for detected hand gestures (espeak-ng / espeak)."""
 
     def __init__(self, enabled: bool = False, cooldown_sec: float = 1.8):
         self.enabled = enabled
@@ -81,193 +106,148 @@ class SpeechAnnouncer:
         self.last_spoken_time = now
 
         def _speak_worker(msg: str):
-            try:
-                subprocess.run(
-                    ["espeak-ng", "-s", "165", msg],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=3,
-                    check=False,
-                )
-            except FileNotFoundError:
+            for cmd in (["espeak-ng", "-s", "165", msg], ["espeak", msg]):
                 try:
                     subprocess.run(
-                        ["espeak", msg],
+                        cmd,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         timeout=3,
                         check=False,
                     )
+                    break
+                except FileNotFoundError:
+                    continue
                 except Exception:
-                    pass
+                    break
 
         threading.Thread(target=_speak_worker, args=(spoken_text,), daemon=True).start()
 
 
 class HandPalmClassifier:
     """
-    21-Landmark Hand & Palm Gesture Classifier.
-    Uses MediaPipe Hands when installed, or falls back to HSV skin-contour convexity
-    defect finger counting if MediaPipe is not installed.
+    Multi-backend Hand & Palm Gesture Classifier for Raspberry Pi.
+    1. Tries legacy `mp.solutions.hands`
+    2. Tries modern `mediapipe.tasks.python.vision.HandLandmarker` (auto-downloads `hand_landmarker.task`)
+    3. Automatically falls back to OpenCV YCrCb Skin-Contour + Convexity Defects palm reader
+       so it NEVER crashes with `AttributeError: module 'mediapipe' has no attribute 'solutions'`.
     """
 
     TIP_IDS = [4, 8, 12, 16, 20]
-    PIP_IDS = [3, 6, 10, 14, 18]
 
-    def __init__(self, min_detection_conf: float = 0.65, min_tracking_conf: float = 0.6):
+    def __init__(self, min_detection_conf: float = 0.60, min_tracking_conf: float = 0.55):
         self.history: deque[str] = deque(maxlen=5)
-        self.mp_hands = None
-        self.hands = None
+        self.backend_name = "opencv-convexity"
+        self.legacy_hands = None
+        self.task_landmarker = None
 
-        if HAS_MEDIAPIPE:
-            self.mp_hands = mp.solutions.hands
-            self.hands = self.mp_hands.Hands(
-                static_image_mode=False,
-                max_num_hands=1,
-                model_complexity=0,  # Lite model for high FPS on Raspberry Pi ARM CPU
-                min_detection_confidence=min_detection_conf,
-                min_tracking_confidence=min_tracking_conf,
-            )
+        # 1. Try MediaPipe Legacy Solutions API
+        if MP_SOLUTIONS_HANDS is not None:
+            try:
+                self.legacy_hands = MP_SOLUTIONS_HANDS.Hands(
+                    static_image_mode=False,
+                    max_num_hands=1,
+                    model_complexity=0,
+                    min_detection_confidence=min_detection_conf,
+                    min_tracking_confidence=min_tracking_conf,
+                )
+                self.backend_name = "mediapipe-solutions"
+                print("[INIT] HandPalmClassifier using MediaPipe Solutions API")
+                return
+            except Exception as exc:
+                print(f"[WARN] MediaPipe Solutions init failed ({exc}), trying Tasks API...")
+                self.legacy_hands = None
+
+        # 2. Try MediaPipe Tasks Vision API (Python 3.12 / Bookworm wheel)
+        if MP_TASKS_VISION is not None and MP_BASE_OPTIONS is not None:
+            model_path = Path(__file__).resolve().parent / "hand_landmarker.task"
+            if not model_path.exists():
+                try:
+                    print(f"[INIT] Downloading MediaPipe hand_landmarker.task to {model_path}...")
+                    urllib.request.urlretrieve(HAND_LANDMARKER_MODEL_URL, str(model_path))
+                except Exception as exc:
+                    print(f"[WARN] Could not download hand_landmarker.task ({exc}), using OpenCV fallback.")
+
+            if model_path.exists():
+                try:
+                    options = MP_TASKS_VISION.HandLandmarkerOptions(
+                        base_options=MP_BASE_OPTIONS(model_asset_path=str(model_path)),
+                        running_mode=MP_TASKS_VISION.RunningMode.IMAGE,
+                        num_hands=1,
+                        min_hand_detection_confidence=min_detection_conf,
+                        min_hand_presence_confidence=min_tracking_conf,
+                    )
+                    self.task_landmarker = MP_TASKS_VISION.HandLandmarker.create_from_options(options)
+                    self.backend_name = "mediapipe-tasks"
+                    print("[INIT] HandPalmClassifier using MediaPipe Tasks HandLandmarker API")
+                    return
+                except Exception as exc:
+                    print(f"[WARN] MediaPipe Tasks HandLandmarker init failed ({exc}), using OpenCV fallback.")
+                    self.task_landmarker = None
+
+        print("[INIT] HandPalmClassifier using OpenCV YCrCb Skin-Contour & Convexity-Defect Palm Reader")
 
     @staticmethod
     def _dist(p1: tuple[float, float], p2: tuple[float, float]) -> float:
         return math.hypot(p1[0] - p2[0], p1[1] - p2[1])
 
-    def process_and_annotate(self, frame_bgr: np.ndarray) -> dict:
-        """
-        Detects hand landmarks, classifies gesture ("1", "2", "3", "4", "5",
-        "CLOSED HAND", "THUMB UP", "OK", etc.), draws skeleton + palm center,
-        and returns telemetry dictionary.
-        """
+    def _classify_21_landmarks(
+        self,
+        frame_bgr: np.ndarray,
+        norm_pts: list[tuple[float, float]],
+        handedness_label: str,
+    ) -> dict:
         h, w = frame_bgr.shape[:2]
-        result_info = {
-            "detected": False,
-            "gesture_code": "NONE",
-            "display_text": "No Hand Detected",
-            "spoken_text": "",
-            "finger_count": 0,
-            "handedness": "N/A",
-            "palm_center": (w // 2, h // 2),
-        }
+        pts = [(int(nx * w), int(ny * h)) for nx, ny in norm_pts]
 
-        if self.hands is None:
-            return result_info
-
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        results = self.hands.process(frame_rgb)
-
-        if not results.multi_hand_landmarks:
-            self.history.clear()
-            return result_info
-
-        hand_lms = results.multi_hand_landmarks[0]
-        handedness_label = "Right"
-        if results.multi_handedness:
-            handedness_label = results.multi_handedness[0].classification[0].label
-
-        pts: list[tuple[int, int]] = []
-        norm_pts: list[tuple[float, float]] = []
-        for lm in hand_lms.landmark:
-            pts.append((int(lm.x * w), int(lm.y * h)))
-            norm_pts.append((lm.x, lm.y))
-
-        # Calculate Palm Center from Wrist (0), Index MCP (5), Pinky MCP (17)
         palm_cx = int((pts[0][0] + pts[5][0] + pts[9][0] + pts[13][0] + pts[17][0]) / 5)
         palm_cy = int((pts[0][1] + pts[5][1] + pts[9][1] + pts[13][1] + pts[17][1]) / 5)
 
-        # Determine which of the 5 fingers are extended
-        # Index (8), Middle (12), Ring (16), Pinky (20): tip higher (smaller y) than PIP joint
         index_up = norm_pts[8][1] < norm_pts[6][1] - 0.015
         middle_up = norm_pts[12][1] < norm_pts[10][1] - 0.015
         ring_up = norm_pts[16][1] < norm_pts[14][1] - 0.015
         pinky_up = norm_pts[20][1] < norm_pts[18][1] - 0.015
 
-        # Thumb extension: check horizontal distance from pinky MCP (17) relative to IP joint (3)
         thumb_tip_to_pinky = self._dist(norm_pts[4], norm_pts[17])
         thumb_ip_to_pinky = self._dist(norm_pts[3], norm_pts[17])
-        thumb_up = thumb_tip_to_pinky > (thumb_ip_to_pinky + 0.035)
+        thumb_up = thumb_tip_to_pinky > (thumb_ip_to_pinky + 0.032)
 
-        fingers = [thumb_up, index_up, middle_up, ring_up, pinky_up]
+        fingers = [int(thumb_up), int(index_up), int(middle_up), int(ring_up), int(pinky_up)]
         four_fingers_count = sum([index_up, middle_up, ring_up, pinky_up])
         total_fingers = sum(fingers)
 
-        # Normalized palm scale (wrist to middle MCP)
         palm_scale = max(self._dist(norm_pts[0], norm_pts[9]), 0.05)
         thumb_index_dist = self._dist(norm_pts[4], norm_pts[8]) / palm_scale
 
-        # Classify gesture rules
-        gesture_code = "UNKNOWN"
-        display_text = f"Fingers: {total_fingers}"
-        spoken_text = str(total_fingers)
-
-        # 1. Check OK Sign (Thumb tip + Index tip pinched together, middle/ring/pinky extended)
         if thumb_index_dist < 0.36 and middle_up and ring_up and pinky_up:
-            gesture_code = "OK"
-            display_text = "OK SIGN (Thumb+Index)"
-            spoken_text = "OK"
-        # 2. Check Thumbs Up / Thumbs Down (only thumb extended, other 4 fingers curled)
+            gesture_code, display_text, spoken_text = "OK", "OK SIGN (Thumb+Index)", "OK"
         elif thumb_up and four_fingers_count == 0:
-            if norm_pts[4][1] < norm_pts[2][1] - 0.03:
-                gesture_code = "THUMB_UP"
-                display_text = "THUMB OK / THUMBS UP"
-                spoken_text = "Thumb OK"
-            elif norm_pts[4][1] > norm_pts[2][1] + 0.03:
-                gesture_code = "THUMB_DOWN"
-                display_text = "THUMBS DOWN"
-                spoken_text = "Thumb Down"
+            if norm_pts[4][1] < norm_pts[2][1] - 0.025:
+                gesture_code, display_text, spoken_text = "THUMB_UP", "THUMB OK / THUMBS UP", "Thumb OK"
+            elif norm_pts[4][1] > norm_pts[2][1] + 0.025:
+                gesture_code, display_text, spoken_text = "THUMB_DOWN", "THUMBS DOWN", "Thumb Down"
             else:
-                gesture_code = "ONE"
-                display_text = "1 - THUMB"
-                spoken_text = "One"
-        # 3. Closed Hand / Fist (0 fingers extended)
+                gesture_code, display_text, spoken_text = "1", "1 - THUMB", "One"
         elif total_fingers == 0:
-            gesture_code = "CLOSED_HAND"
-            display_text = "CLOSED HAND (FIST - 0)"
-            spoken_text = "Closed Hand"
-        # 4. Rock On (Index + Pinky only)
+            gesture_code, display_text, spoken_text = "CLOSED_HAND", "CLOSED HAND (FIST - 0)", "Closed Hand"
         elif not thumb_up and index_up and not middle_up and not ring_up and pinky_up:
-            gesture_code = "ROCK"
-            display_text = "ROCK ON"
-            spoken_text = "Rock On"
-        # 5. Call Me / Shaka (Thumb + Pinky only)
+            gesture_code, display_text, spoken_text = "ROCK", "ROCK ON", "Rock On"
         elif thumb_up and not index_up and not middle_up and not ring_up and pinky_up:
-            gesture_code = "CALL_ME"
-            display_text = "CALL ME"
-            spoken_text = "Call Me"
-        # 6. Standard Finger Counts 1, 2, 3, 4, 5
-        elif total_fingers == 1 and index_up:
-            gesture_code = "1"
-            display_text = "1 - ONE FINGER"
-            spoken_text = "One"
-        elif total_fingers == 2 and index_up and middle_up:
-            gesture_code = "2"
-            display_text = "2 - TWO FINGERS"
-            spoken_text = "Two"
-        elif (
-            (total_fingers == 3 and index_up and middle_up and ring_up)
-            or (total_fingers == 3 and thumb_up and index_up and middle_up)
-        ):
-            gesture_code = "3"
-            display_text = "3 - THREE FINGERS"
-            spoken_text = "Three"
-        elif four_fingers_count == 4 and not thumb_up:
-            gesture_code = "4"
-            display_text = "4 - FOUR FINGERS"
-            spoken_text = "Four"
-        elif total_fingers == 5:
-            gesture_code = "5"
-            display_text = "5 - OPEN PALM (ALL 5)"
-            spoken_text = "Five"
+            gesture_code, display_text, spoken_text = "CALL_ME", "CALL ME", "Call Me"
+        elif total_fingers == 1:
+            gesture_code, display_text, spoken_text = "1", "1 - ONE FINGER", "One"
+        elif total_fingers == 2:
+            gesture_code, display_text, spoken_text = "2", "2 - TWO FINGERS", "Two"
+        elif total_fingers == 3:
+            gesture_code, display_text, spoken_text = "3", "3 - THREE FINGERS", "Three"
+        elif total_fingers == 4:
+            gesture_code, display_text, spoken_text = "4", "4 - FOUR FINGERS", "Four"
         else:
-            gesture_code = str(total_fingers)
-            display_text = f"{total_fingers} - FINGERS UP"
-            spoken_text = str(total_fingers)
+            gesture_code, display_text, spoken_text = "5", "5 - OPEN PALM (ALL 5)", "Five"
 
-        # Temporal smoothing across last 5 frames
         self.history.append(gesture_code)
         stable_code = max(set(self.history), key=self.history.count)
 
-        # Draw 21-point hand skeleton and palm reader ring on frame
         connections = [
             (0, 1), (1, 2), (2, 3), (3, 4),
             (0, 5), (5, 6), (6, 7), (7, 8),
@@ -282,10 +262,8 @@ class HandPalmClassifier:
         for idx, pt in enumerate(pts):
             is_tip = idx in self.TIP_IDS
             color = (74, 222, 128) if is_tip else (248, 250, 252)
-            radius = 5 if is_tip else 3
-            cv2.circle(frame_bgr, pt, radius, color, -1, cv2.LINE_AA)
+            cv2.circle(frame_bgr, pt, 5 if is_tip else 3, color, -1, cv2.LINE_AA)
 
-        # Draw Palm Center node & biometric ring
         cv2.circle(frame_bgr, (palm_cx, palm_cy), 16, (250, 204, 21), 1, cv2.LINE_AA)
         cv2.circle(frame_bgr, (palm_cx, palm_cy), 3, (250, 204, 21), -1, cv2.LINE_AA)
 
@@ -300,16 +278,192 @@ class HandPalmClassifier:
             "palm_center": (palm_cx, palm_cy),
         }
 
+    def _process_opencv_fallback(self, frame_bgr: np.ndarray) -> dict:
+        """
+        Pure OpenCV YCrCb skin-mask + Convex Hull & Convexity Defects palm reader.
+        Works when MediaPipe is unavailable or broken on Raspberry Pi OS.
+        """
+        h, w = frame_bgr.shape[:2]
+        default_res = {
+            "detected": False,
+            "gesture_code": "NONE",
+            "display_text": "Show Hand in Center ROI",
+            "spoken_text": "",
+            "finger_count": 0,
+            "handedness": "CV-Palm",
+            "palm_center": (w // 2, h // 2),
+        }
+
+        # Define active palm region in center of 480x320 frame
+        x0, y0, x1, y1 = int(w * 0.12), int(h * 0.10), int(w * 0.88), int(h * 0.88)
+        roi = frame_bgr[y0:y1, x0:x1]
+        cv2.rectangle(frame_bgr, (x0, y0), (x1, y1), (51, 65, 85), 1)
+
+        blurred = cv2.GaussianBlur(roi, (7, 7), 0)
+        ycrcb = cv2.cvtColor(blurred, cv2.COLOR_BGR2YCrCb)
+        lower_skin = np.array([0, 133, 77], dtype=np.uint8)
+        upper_skin = np.array([255, 173, 127], dtype=np.uint8)
+        mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            self.history.clear()
+            return default_res
+
+        cnt = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(cnt)
+        if area < 3200:
+            self.history.clear()
+            return default_res
+
+        # Compute palm center via image moments
+        moments = cv2.moments(cnt)
+        if moments["m00"] == 0:
+            return default_res
+        cx = int(moments["m10"] / moments["m00"]) + x0
+        cy = int(moments["m01"] / moments["m00"]) + y0
+
+        hull_pts = cv2.convexHull(cnt)
+        hull_area = max(cv2.contourArea(hull_pts), 1.0)
+        solidity = area / hull_area
+        x_box, y_box, w_box, h_box = cv2.boundingRect(cnt)
+        aspect_ratio = float(h_box) / max(w_box, 1)
+
+        hull_indices = cv2.convexHull(cnt, returnPoints=False)
+        defect_fingers = 0
+        fingertips: list[tuple[int, int]] = []
+
+        if hull_indices is not None and len(hull_indices) > 3 and len(cnt) > 3:
+            defects = cv2.convexityDefects(cnt, hull_indices)
+            if defects is not None:
+                for i in range(defects.shape[0]):
+                    s, e, f, d = defects[i, 0]
+                    start = tuple(cnt[s][0])
+                    end = tuple(cnt[e][0])
+                    far = tuple(cnt[f][0])
+
+                    a = math.hypot(end[0] - start[0], end[1] - start[1])
+                    b = math.hypot(far[0] - start[0], far[1] - start[1])
+                    c = math.hypot(end[0] - far[0], end[1] - far[1])
+                    if b * c == 0:
+                        continue
+                    angle = math.degrees(math.acos(max(-1.0, min(1.0, (b * b + c * c - a * a) / (2 * b * c)))))
+                    depth_px = d / 256.0
+                    if angle <= 88.0 and depth_px > 22.0:
+                        defect_fingers += 1
+                        fingertips.append((start[0] + x0, start[1] + y0))
+                        cv2.circle(frame_bgr, (far[0] + x0, far[1] + y0), 4, (244, 63, 94), -1)
+
+        # Shift contour & hull to full frame coordinates and draw
+        cnt_shifted = cnt + np.array([[[x0, y0]]])
+        hull_shifted = hull_pts + np.array([[[x0, y0]]])
+        cv2.drawContours(frame_bgr, [cnt_shifted], -1, (56, 189, 248), 2)
+        cv2.drawContours(frame_bgr, [hull_shifted], -1, (74, 222, 128), 1)
+        cv2.circle(frame_bgr, (cx, cy), 16, (250, 204, 21), 2)
+
+        for tip in fingertips[:5]:
+            cv2.circle(frame_bgr, tip, 6, (74, 222, 128), -1)
+
+        if defect_fingers == 0:
+            if solidity > 0.83:
+                total_fingers = 0
+                gesture_code, display_text, spoken_text = "CLOSED_HAND", "CLOSED HAND (FIST - 0)", "Closed Hand"
+            elif aspect_ratio < 1.15:
+                total_fingers = 1
+                gesture_code, display_text, spoken_text = "THUMB_UP", "THUMB OK / THUMBS UP", "Thumb OK"
+            else:
+                total_fingers = 1
+                gesture_code, display_text, spoken_text = "1", "1 - ONE FINGER", "One"
+        else:
+            total_fingers = min(5, defect_fingers + 1)
+            spoken_map = {1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five"}
+            label_map = {
+                1: "1 - ONE FINGER",
+                2: "2 - TWO FINGERS",
+                3: "3 - THREE FINGERS",
+                4: "4 - FOUR FINGERS",
+                5: "5 - OPEN PALM (ALL 5)",
+            }
+            gesture_code = str(total_fingers)
+            display_text = label_map[total_fingers]
+            spoken_text = spoken_map[total_fingers]
+
+        self.history.append(gesture_code)
+        stable_code = max(set(self.history), key=self.history.count)
+
+        return {
+            "detected": True,
+            "gesture_code": stable_code,
+            "display_text": display_text,
+            "spoken_text": spoken_text,
+            "finger_count": total_fingers,
+            "handedness": "CV-Palm",
+            "palm_center": (cx, cy),
+        }
+
+    def process_and_annotate(self, frame_bgr: np.ndarray) -> dict:
+        h, w = frame_bgr.shape[:2]
+        empty_res = {
+            "detected": False,
+            "gesture_code": "NONE",
+            "display_text": "No Hand Detected",
+            "spoken_text": "",
+            "finger_count": 0,
+            "handedness": "N/A",
+            "palm_center": (w // 2, h // 2),
+        }
+
+        # Path 1: Legacy MediaPipe Solutions API
+        if self.legacy_hands is not None:
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            results = self.legacy_hands.process(frame_rgb)
+            if not results.multi_hand_landmarks:
+                self.history.clear()
+                return empty_res
+            hand_lms = results.multi_hand_landmarks[0]
+            handedness_label = "Right"
+            if results.multi_handedness:
+                handedness_label = results.multi_handedness[0].classification[0].label
+            norm_pts = [(lm.x, lm.y) for lm in hand_lms.landmark]
+            return self._classify_21_landmarks(frame_bgr, norm_pts, handedness_label)
+
+        # Path 2: Modern MediaPipe Tasks Vision HandLandmarker API
+        if self.task_landmarker is not None and MP_IMAGE_CLS is not None and mp is not None:
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            mp_image = MP_IMAGE_CLS(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            detection_result = self.task_landmarker.detect(mp_image)
+            if not detection_result.hand_landmarks:
+                self.history.clear()
+                return empty_res
+            lms = detection_result.hand_landmarks[0]
+            handedness_label = "Right"
+            if detection_result.handedness and detection_result.handedness[0]:
+                handedness_label = detection_result.handedness[0][0].category_name or "Right"
+            norm_pts = [(lm.x, lm.y) for lm in lms]
+            return self._classify_21_landmarks(frame_bgr, norm_pts, handedness_label)
+
+        # Path 3: Pure OpenCV Convexity-Defect Palm Reader Fallback
+        return self._process_opencv_fallback(frame_bgr)
+
     def close(self) -> None:
-        if self.hands is not None:
-            self.hands.close()
+        if self.legacy_hands is not None:
+            try:
+                self.legacy_hands.close()
+            except Exception:
+                pass
+        if self.task_landmarker is not None:
+            try:
+                self.task_landmarker.close()
+            except Exception:
+                pass
 
 
 class FramebufferDisplay:
-    """
-    Writes BGR888 OpenCV frames directly into a 16-bit RGB565 Linux framebuffer
-    device (e.g., /dev/fb1).
-    """
+    """Writes BGR888 OpenCV frames directly into a 16-bit RGB565 Linux framebuffer (/dev/fb1)."""
 
     def __init__(self, fb_device: str = "/dev/fb1", width: int = 480, height: int = 320):
         self.fb_device = fb_device
@@ -468,6 +622,10 @@ class CameraSource:
     def read_bgr(self) -> np.ndarray | None:
         if self.picam2 is not None:
             arr = self.picam2.capture_array("main")
+            if arr is None:
+                return None
+            if arr.shape[2] == 4:
+                return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
             return arr
         if self.cap is not None:
             ok, frame = self.cap.read()
@@ -529,17 +687,17 @@ def draw_hud(frame: np.ndarray, fps: float, cpu_temp: float, mode_label: str, ge
             f"PALM READER: {gesture_info['display_text']}",
             (10, h - 11),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.52,
+            0.50,
             banner_color,
             2,
             cv2.LINE_AA,
         )
         cv2.putText(
             frame,
-            f"HAND: {gesture_info['handedness']} | UP: {gesture_info['finger_count']}/5",
-            (w - 175, h - 12),
+            f"UP: {gesture_info['finger_count']}/5",
+            (w - 82, h - 12),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.40,
+            0.42,
             (248, 250, 252),
             1,
             cv2.LINE_AA,
@@ -563,9 +721,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rotation", type=int, choices=[0, 90, 180, 270], default=0)
     parser.add_argument("--flip-h", action="store_true")
     parser.add_argument("--flip-v", action="store_true")
-    parser.add_argument("--gesture", action="store_true", default=True, help="Enable 21-point Hand Gesture & Palm Reader")
+    parser.add_argument("--gesture", action="store_true", default=True, help="Enable Hand Gesture & Palm Reader")
     parser.add_argument("--no-gesture", action="store_false", dest="gesture")
-    parser.add_argument("--tts", action="store_true", default=False, help="Speak recognized gesture aloud (1,2,3,4,5, Closed Hand, Thumb OK)")
+    parser.add_argument("--tts", action="store_true", default=False, help="Speak recognized gesture aloud")
     parser.add_argument("--hud", action="store_true", default=True)
     parser.add_argument("--no-hud", action="store_false", dest="hud")
     return parser.parse_args()
@@ -575,7 +733,7 @@ def main() -> int:
     args = parse_args()
     running = True
 
-    def handle_sig(signum, _frame):
+    def handle_sig(_signum, _frame):
         nonlocal running
         running = False
 

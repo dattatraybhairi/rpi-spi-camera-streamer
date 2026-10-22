@@ -6,6 +6,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="rpi-spi-cam.service"
+MODEL_URL="https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 
 echo "==> [1/5] Installing Raspberry Pi system packages (Picamera2, OpenCV, SPI, eSpeak TTS)..."
 sudo apt-get update -y
@@ -17,10 +18,15 @@ sudo apt-get install -y \
   python3-rpi-lgpio \
   python3-pip \
   espeak-ng \
+  curl \
   git
 
-echo "==> [2/5] Installing MediaPipe for 21-Point Hand Gesture & Palm Reading..."
-pip3 install --break-system-packages mediapipe || pip3 install mediapipe || echo "    [WARN] MediaPipe wheel skipped; OpenCV fallback active."
+echo "==> [2/5] Installing MediaPipe & Downloading hand_landmarker.task model..."
+pip3 install --break-system-packages mediapipe || pip3 install mediapipe || echo "    [INFO] Using OpenCV YCrCb Convexity-Defect Palm Reader fallback."
+
+if [ ! -f "${REPO_DIR}/hand_landmarker.task" ]; then
+  curl -L -sS "${MODEL_URL}" -o "${REPO_DIR}/hand_landmarker.task" || true
+fi
 
 echo "==> [3/5] Verifying SPI interface in /boot/firmware/config.txt..."
 BOOT_CONFIG="/boot/firmware/config.txt"
@@ -64,7 +70,4 @@ echo "======================================================================"
 echo " Installation Complete!"
 echo " Run directly now with Hand Gesture & Voice TTS:"
 echo "   python3 rpi_camera_spi_stream.py --mode fb --fb-dev /dev/fb1 --gesture --tts --hud"
-echo ""
-echo " Or enable auto-start on boot:"
-echo "   sudo systemctl enable --now ${SERVICE_NAME}"
 echo "======================================================================"
