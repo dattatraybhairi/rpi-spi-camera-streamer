@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RPi 3.5" SPI Hand Gesture &amp; Palm Reader Simulation</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #1e293b;
+        --border: #334155;
+        --text: #f8fafc;
+        --muted: #94a3b8;
+        --accent: #0ea5e9;
+        --green: #22c55e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        padding: 24px;
+      }
+      .container {
+        max-width: 1120px;
+        margin: 0 auto;
+        display: grid;
+        grid-template-columns: 520px 1fr;
+        gap: 24px;
+      }
+      @media (max-width: 920px) {
+        .container {
+          grid-template-columns: 1fr;
+        }
+      }
+      .card {
+        background: rgba(30, 41, 59, 0.75);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 20px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 6px 0;
+      }
+      p.sub {
+        margin: 0 0 16px 0;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .lcd-bezel {
+        background: #020617;
+        border: 2px solid #475569;
+        border-radius: 10px;
+        padding: 12px;
+      }
+      canvas {
+        width: 100%;
+        height: auto;
+        background: #000;
+        border-radius: 4px;
+        display: block;
+      }
+      .preset-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+        margin-top: 14px;
+      }
+      button {
+        background: #0f172a;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: var(--accent);
+      }
+      button.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      .telemetry {
+        margin-top: 14px;
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+        font-family: monospace;
+        font-size: 12px;
+      }
+      .stat-box {
+        background: #020617;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="card">
+        <h1>3.5" SPI Display (480×320 RGB565) — Hand &amp; Palm Simulator</h1>
+        <p class="sub">
+          Simulates 21-point MediaPipe hand skeleton, finger states (1, 2, 3, 4, 5, Closed Hand, Thumb OK, OK Sign), and Web Speech voice output.
+        </p>
+
+        <div class="lcd-bezel">
+          <canvas id="spiCanvas" width="480" height="320"></canvas>
+        </div>
+
+        <div class="preset-grid" id="presetButtons"></div>
+      </div>
+
+      <div class="card">
+        <h1>Live Palm Reader Telemetry &amp; Speech Announcer</h1>
+        <p class="sub">
+          Select any hand gesture preset on the left (or toggle Auto-Cycle) to inspect the 21 landmarks and hear the spoken readout.
+        </p>
+
+        <div style="display: flex; gap: 10px; margin-bottom: 14px">
+          <button id="ttsBtn" class="active" onclick="toggleTts()">Voice TTS: ON</button>
+          <button id="autoBtn" onclick="toggleAuto()">Auto-Cycle Gestures: OFF</button>
+        </div>
+
+        <div class="telemetry">
+          <div class="stat-box">
+            <div style="color: #94a3b8">RECOGNIZED GESTURE</div>
+            <div id="gestureLabel" style="font-size: 16px; color: #4ade80; font-weight: bold; margin-top: 4px">
+              5 - OPEN PALM
+            </div>
+          </div>
+          <div class="stat-box">
+            <div style="color: #94a3b8">SPOKEN PHRASE (TTS)</div>
+            <div id="spokenLabel" style="font-size: 16px; color: #38bdf8; font-weight: bold; margin-top: 4px">
+              "Five"
+            </div>
+          </div>
+          <div class="stat-box">
+            <div style="color: #94a3b8">FINGER BITMASK [T, I, M, R, P]</div>
+            <div id="fingerMask" style="font-size: 14px; margin-top: 4px">[1, 1, 1, 1, 1] (5/5 UP)</div>
+          </div>
+          <div class="stat-box">
+            <div style="color: #94a3b8">SPI BUS STREAM</div>
+            <div style="font-size: 14px; margin-top: 4px">/dev/fb1 · 32MHz · 30.0 FPS</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const GESTURES = [
+        { id: 'CLOSED_HAND', btn: 'Closed (0)', title: 'CLOSED HAND (FIST - 0)', spoken: 'Closed Hand', fingers: [0, 0, 0, 0, 0] },
+        { id: '1', btn: '1 Finger', title: '1 - ONE FINGER', spoken: 'One', fingers: [0, 1, 0, 0, 0] },
+        { id: '2', btn: '2 Fingers', title: '2 - TWO FINGERS', spoken: 'Two', fingers: [0, 1, 1, 0, 0] },
+        { id: '3', btn: '3 Fingers', title: '3 - THREE FINGERS', spoken: 'Three', fingers: [0, 1, 1, 1, 0] },
+        { id: '4', btn: '4 Fingers', title: '4 - FOUR FINGERS', spoken: 'Four', fingers: [0, 1, 1, 1, 1] },
+        { id: '5', btn: '5 Open Palm', title: '5 - OPEN PALM (ALL 5)', spoken: 'Five', fingers: [1, 1, 1, 1, 1] },
+        { id: 'THUMB_UP', btn: 'Thumb OK', title: 'THUMB OK / THUMBS UP', spoken: 'Thumb OK', fingers: [1, 0, 0, 0, 0] },
+        { id: 'OK', btn: 'OK Sign', title: 'OK SIGN (PINCH)', spoken: 'OK', fingers: [1, 0, 1, 1, 1], pinch: true }
+      ];
+
+      let currentGesture = GESTURES[5];
+      let ttsEnabled = true;
+      let autoCycle = false;
+      let autoTimer = null;
+
+      const btnContainer = document.getElementById('presetButtons');
+      GESTURES.forEach((g) => {
+        const b = document.createElement('button');
+        b.textContent = g.btn;
+        b.id = 'btn-' + g.id;
+        if (g.id === currentGesture.id) b.classList.add('active');
+        b.onclick = () => selectGesture(g);
+        btnContainer.appendChild(b);
+      });
+
+      function speak(text) {
+        if (!ttsEnabled || !('speechSynthesis' in window)) return;
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        u.rate = 1.05;
+        window.speechSynthesis.speak(u);
+      }
+
+      function selectGesture(g) {
+        currentGesture = g;
+        GESTURES.forEach((item) => {
+          document.getElementById('btn-' + item.id).classList.toggle('active', item.id === g.id);
+        });
+        document.getElementById('gestureLabel').textContent = g.title;
+        document.getElementById('spokenLabel').textContent = '"' + g.spoken + '"';
+        const count = g.fingers.reduce((a, b) => a + b, 0);
+        document.getElementById('fingerMask').textContent =
+          '[' + g.fingers.join(', ') + '] (' + count + '/5 UP)';
+        speak(g.spoken);
+      }
+
+      function toggleTts() {
+        ttsEnabled = !ttsEnabled;
+        const b = document.getElementById('ttsBtn');
+        b.textContent = 'Voice TTS: ' + (ttsEnabled ? 'ON' : 'OFF');
+        b.classList.toggle('active', ttsEnabled);
+      }
+
+      function toggleAuto() {
+        autoCycle = !autoCycle;
+        const b = document.getElementById('autoBtn');
+        b.textContent = 'Auto-Cycle Gestures: ' + (autoCycle ? 'ON' : 'OFF');
+        b.classList.toggle('active', autoCycle);
+        if (autoCycle) {
+          let idx = 0;
+          autoTimer = setInterval(() => {
+            idx = (idx + 1) % GESTURES.length;
+            selectGesture(GESTURES[idx]);
+          }, 2200);
+        } else if (autoTimer) {
+          clearInterval(autoTimer);
+        }
+      }
+
+      const canvas = document.getElementById('spiCanvas');
+      const ctx = canvas.getContext('2d');
+
+      function render(now) {
+        requestAnimationFrame(render);
+        const w = canvas.width;
+        const h = canvas.height;
+        ctx.fillStyle = '#090d16';
+        ctx.fillRect(0, 0, w, h);
+
+        const cx = w * 0.5 + Math.sin(now * 0.002) * 8;
+        const cy = h * 0.62 + Math.cos(now * 0.002) * 5;
+        const wrist = [cx, cy + 58];
+        const mcps = [
+          [cx - 48, cy + 18],
+          [cx - 28, cy - 18],
+          [cx - 8, cy - 24],
+          [cx + 14, cy - 20],
+          [cx + 34, cy - 10]
+        ];
+
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 2;
+        mcps.forEach((mcp, i) => {
+          ctx.beginPath();
+          ctx.moveTo(wrist[0], wrist[1]);
+          ctx.lineTo(mcp[0], mcp[1]);
+          ctx.stroke();
+
+          const isUp = currentGesture.fingers[i] === 1;
+          let tipX = mcp[0] + (i === 0 ? (isUp ? -36 : -8) : (i - 2) * 6);
+          let tipY = mcp[1] + (isUp ? -65 : 18);
+          if (currentGesture.pinch && (i === 0 || i === 1)) {
+            tipX = cx - 32;
+            tipY = cy - 42;
+          }
+
+          ctx.beginPath();
+          ctx.moveTo(mcp[0], mcp[1]);
+          ctx.lineTo(tipX, tipY);
+          ctx.stroke();
+
+          ctx.fillStyle = '#f8fafc';
+          ctx.beginPath();
+          ctx.arc(mcp[0], mcp[1], 4, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = isUp ? '#4ade80' : '#f43f5e';
+          ctx.beginPath();
+          ctx.arc(tipX, tipY, 6, 0, Math.PI * 2);
+          ctx.fill();
+        });
+
+        // Palm center circle
+        ctx.strokeStyle = '#facc15';
+        ctx.beginPath();
+        ctx.arc(cx - 4, cy + 6, 18, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Top & bottom HUD bars
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+        ctx.fillRect(0, 0, w, 26);
+        ctx.fillRect(0, h - 34, w, 34);
+
+        ctx.fillStyle = '#f8fafc';
+        ctx.font = '12px monospace';
+        ctx.fillText('SPI 3.5" 480x320 RGB565 | /dev/fb1', 8, 17);
+        ctx.fillStyle = '#4ade80';
+        ctx.fillText('30.0 FPS | PALM LOCKED', w - 165, 17);
+
+        ctx.fillStyle = '#4ade80';
+        ctx.font = 'bold 14px monospace';
+        ctx.fillText('PALM READER: ' + currentGesture.title, 10, h - 12);
+      }
+      requestAnimationFrame(render);
+    </script>
+  </body>
+</html>

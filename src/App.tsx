@@ -3,23 +3,24 @@ import {
   Check,
   Copy,
   Download,
-  FileCode,
   GitBranch,
   HardDrive,
-  RefreshCw,
   Terminal,
 } from 'lucide-react';
 import {
+  AI_REUSABLE_PROMPT,
   DEFAULT_CONFIG,
+  generateGithubActionYaml,
   generateInstallScript,
   generatePythonScript,
   generateReadmeMarkdown,
+  generateSimulationHtml,
   StreamConfig,
 } from './data/rpiTemplates';
 import { SpiDisplaySimulator } from './components/SpiDisplaySimulator';
 import { GpioPinoutTable } from './components/GpioPinoutTable';
 
-type CodeTab = 'python' | 'readme' | 'install';
+type CodeTab = 'python' | 'simulation' | 'workflow' | 'readme' | 'install' | 'prompt';
 
 export default function App() {
   const [config, setConfig] = useState<StreamConfig>(DEFAULT_CONFIG);
@@ -30,10 +31,12 @@ export default function App() {
     message: string;
   }>({
     status: 'idle',
-    message: 'Workspace files synced on disk',
+    message: 'All 5 workspace files synced on disk',
   });
 
   const pythonScript = useMemo(() => generatePythonScript(config), [config]);
+  const simulationHtml = useMemo(() => generateSimulationHtml(config), [config]);
+  const githubActionYaml = useMemo(() => generateGithubActionYaml(config), [config]);
   const installScript = useMemo(() => generateInstallScript(config), [config]);
   const readmeMarkdown = useMemo(() => generateReadmeMarkdown(config), [config]);
 
@@ -46,10 +49,10 @@ export default function App() {
         ? `--mode fb --fb-dev ${config.fbDevice}`
         : `--mode spi --spi-bus ${config.spiBus} --spi-cs ${config.spiCs} --spi-speed ${config.spiSpeedHz} --dc-pin ${config.dcPin} --rst-pin ${config.rstPin}`;
     return `python3 rpi_camera_spi_stream.py ${modeArgs} --camera-backend ${config.cameraBackend} --width ${config.width} --height ${config.height} --fps ${config.targetFps}${
-      config.rotation ? ` --rotation ${config.rotation}` : ''
-    }${config.flipH ? ' --flip-h' : ''}${config.flipV ? ' --flip-v' : ''}${
-      config.hud ? ' --hud' : ' --no-hud'
-    }`;
+      config.gestureEnabled ? ' --gesture' : ' --no-gesture'
+    }${config.ttsEnabled ? ' --tts' : ''}${config.rotation ? ` --rotation ${config.rotation}` : ''}${
+      config.flipH ? ' --flip-h' : ''
+    }${config.flipV ? ' --flip-v' : ''}${config.hud ? ' --hud' : ' --no-hud'}`;
   }, [config]);
 
   const oneLineCloneAndRun = useMemo(() => {
@@ -58,8 +61,8 @@ export default function App() {
 
   const gitPushBlock = useMemo(() => {
     return `git init
-git add rpi_camera_spi_stream.py install_rpi.sh README.md
-git commit -m "Build and push 3.5 inch RPi SPI camera streamer and direct run README"
+git add rpi_camera_spi_stream.py install_rpi.sh simulation.html .github/workflows/rpi-gesture-ci.yml README.md
+git commit -m "Add MediaPipe hand gesture palm reader (1-5, Closed Hand, Thumb OK), simulation.html, and GitHub Action"
 git branch -M main
 git remote remove origin 2>/dev/null || true
 git remote add origin ${config.gitRepoUrl}
@@ -74,7 +77,6 @@ git push -u origin main`;
         setCopiedId((prev) => (prev === id ? null : prev));
       }, 1800);
     } catch {
-      // Fallback copy if clipboard restricted
       const textarea = document.createElement('textarea');
       textarea.value = text;
       document.body.appendChild(textarea);
@@ -100,12 +102,14 @@ git push -u origin main`;
 
   const handleDownloadAll = () => {
     handleDownload('rpi_camera_spi_stream.py', pythonScript);
-    setTimeout(() => handleDownload('install_rpi.sh', installScript), 150);
-    setTimeout(() => handleDownload('README.md', readmeMarkdown), 300);
+    setTimeout(() => handleDownload('simulation.html', simulationHtml), 120);
+    setTimeout(() => handleDownload('rpi-gesture-ci.yml', githubActionYaml), 240);
+    setTimeout(() => handleDownload('install_rpi.sh', installScript), 360);
+    setTimeout(() => handleDownload('README.md', readmeMarkdown), 480);
   };
 
   const handleSyncToWorkspace = async () => {
-    setSyncState({ status: 'saving', message: 'Writing files to project root...' });
+    setSyncState({ status: 'saving', message: 'Writing 5 files to project root...' });
     try {
       const res = await fetch('/api/sync-files', {
         method: 'POST',
@@ -118,7 +122,7 @@ git push -u origin main`;
       }
       setSyncState({
         status: 'saved',
-        message: 'Synced rpi_camera_spi_stream.py, install_rpi.sh & README.md to disk',
+        message: 'Synced Python, simulation.html, GitHub Action, install_rpi.sh & README.md',
       });
     } catch (err) {
       setSyncState({
@@ -131,16 +135,28 @@ git push -u origin main`;
   const currentFileContent =
     activeTab === 'python'
       ? pythonScript
+      : activeTab === 'simulation'
+      ? simulationHtml
+      : activeTab === 'workflow'
+      ? githubActionYaml
       : activeTab === 'readme'
       ? readmeMarkdown
-      : installScript;
+      : activeTab === 'install'
+      ? installScript
+      : AI_REUSABLE_PROMPT;
 
   const currentFileName =
     activeTab === 'python'
       ? 'rpi_camera_spi_stream.py'
+      : activeTab === 'simulation'
+      ? 'simulation.html'
+      : activeTab === 'workflow'
+      ? 'rpi-gesture-ci.yml'
       : activeTab === 'readme'
       ? 'README.md'
-      : 'install_rpi.sh';
+      : activeTab === 'install'
+      ? 'install_rpi.sh'
+      : 'hand_gesture_prompt.txt';
 
   return (
     <div className="min-h-screen bg-[#0F172A] text-slate-100 flex flex-col">
@@ -150,7 +166,7 @@ git push -u origin main`;
           href="#top"
           className="text-lg font-bold tracking-tight text-slate-100 font-display whitespace-nowrap shrink-0"
         >
-          RPi SPI Streamer
+          RPi SPI Palm Streamer
         </a>
 
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-400">
@@ -158,19 +174,19 @@ git push -u origin main`;
             href="#simulator"
             className="hover:text-slate-100 transition-colors whitespace-nowrap shrink-0"
           >
-            Display Simulator
+            Palm Simulator
           </a>
           <a
             href="#code-files"
             className="hover:text-slate-100 transition-colors whitespace-nowrap shrink-0"
           >
-            Python &amp; README
+            Code &amp; Prompt
           </a>
           <a
             href="#git-deploy"
             className="hover:text-slate-100 transition-colors whitespace-nowrap shrink-0"
           >
-            Push &amp; Clone
+            GitHub &amp; RPi Run
           </a>
           <a
             href="#gpio-wiring"
@@ -187,39 +203,38 @@ git push -u origin main`;
             className="px-4 py-2 text-xs font-medium text-white bg-sky-600 rounded-lg hover:bg-sky-500 transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
           >
             <Download className="w-3.5 h-3.5" />
-            Download RPi Bundle
+            Download Full Bundle
           </button>
         </div>
       </header>
 
-      {/* Main Content Container */}
       <main id="top" className="max-w-[1380px] w-full mx-auto px-6 py-8 space-y-10 flex-1">
         {/* Hero Overview & Direct Run Command Bar */}
         <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
           <div className="lg:col-span-7 border border-slate-800 bg-slate-900/70 rounded-xl p-6 flex flex-col justify-between">
             <div>
               <p className="text-xs text-slate-400 mb-2">
-                <span>Raspberry Pi OS Bookworm / Bullseye</span>
+                <span>MediaPipe 21-Landmark Hand Reader</span>
                 <span className="mx-1.5" aria-hidden="true">·</span>
-                <span>3.5&quot; 480×320 SPI LCD (ILI9486 / Waveshare / MHS35)</span>
+                <span>3.5&quot; 480×320 SPI LCD (RGB565)</span>
                 <span className="mx-1.5" aria-hidden="true">·</span>
-                <span>16-Bit RGB565</span>
+                <span>Voice TTS: 1, 2, 3, 4, 5, Closed Hand, Thumb OK</span>
               </p>
               <h1
                 className="text-2xl sm:text-3xl font-bold text-slate-50 font-display tracking-tight"
                 style={{ textWrap: 'balance' }}
               >
-                Python Camera Streamer for 3.5-Inch Raspberry Pi SPI Displays
+                RPi 3.5&quot; SPI Camera Streamer with Hand Gesture &amp; Palm Reader
               </h1>
               <p className="text-sm text-slate-300 mt-3 leading-relaxed max-w-[68ch]">
-                Streams live frames from a Raspberry Pi CSI Ribbon Camera (<code className="text-sky-300">Picamera2</code>) or USB V4L2 Webcam (<code className="text-sky-300">OpenCV</code>) directly to a 3.5-inch SPI display using either kernel DMA Framebuffer (<code className="text-emerald-300">/dev/fb1</code>) with vectorized NumPy RGB565 packing or userspace <code className="text-emerald-300">spidev0.0</code> + GPIO hardware control.
+                Streams live Raspberry Pi camera frames to a 3.5-inch SPI display (<code className="text-emerald-300">/dev/fb1</code> or <code className="text-emerald-300">spidev0.0</code>) while running real-time 21-point hand &amp; palm landmark classification (<code className="text-sky-300">1, 2, 3, 4, 5, Closed Hand, Thumb OK, OK Sign</code>) with non-blocking speech announcements (<code className="text-sky-300">espeak-ng</code>), standalone <code className="text-amber-300">simulation.html</code>, and GitHub Actions CI.
               </p>
             </div>
 
             <div className="mt-6 pt-5 border-t border-slate-800">
               <div className="flex items-center justify-between gap-2 mb-2">
                 <span className="text-xs font-medium text-slate-300">
-                  Direct Clone &amp; Run on Raspberry Pi Terminal
+                  Direct Clone &amp; Run on Raspberry Pi (with Hand Gesture &amp; Voice TTS)
                 </span>
                 <button
                   type="button"
@@ -245,16 +260,16 @@ git push -u origin main`;
             </div>
           </div>
 
-          {/* Hardware Parameter Configurator */}
+          {/* Hardware & Gesture Parameter Configurator */}
           <div className="lg:col-span-5 border border-slate-800 bg-slate-900/70 rounded-xl p-6 flex flex-col justify-between">
             <div>
               <div className="flex items-center justify-between gap-2 pb-3 mb-4 border-b border-slate-800">
                 <div>
                   <h2 className="text-base font-semibold text-slate-100">
-                    SPI Display &amp; Camera Configuration
+                    SPI Display &amp; Palm Reader Settings
                   </h2>
                   <p className="text-xs text-slate-400">
-                    Adjust hardware flags to update the Python script, simulator, and README live
+                    Configure SPI bus, MediaPipe confidence, and voice synthesis
                   </p>
                 </div>
                 <button
@@ -280,7 +295,7 @@ git push -u origin main`;
                           : 'text-slate-400 hover:text-slate-200'
                       }`}
                     >
-                      Framebuffer (/dev/fb1)
+                      /dev/fb1
                     </button>
                     <button
                       type="button"
@@ -297,63 +312,6 @@ git push -u origin main`;
                 </div>
 
                 <div>
-                  <label className="block text-slate-400 mb-1">3.5&quot; Display Hat Model</label>
-                  <select
-                    value={config.displayModel}
-                    onChange={(e) =>
-                      setConfig((c) => ({
-                        ...c,
-                        displayModel: e.target.value as StreamConfig['displayModel'],
-                      }))
-                    }
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-sky-500"
-                  >
-                    <option value="waveshare35a">Waveshare 3.5&quot; Rev A/B/C</option>
-                    <option value="mhs35">MHS-3.5&quot; SPI RPi Display</option>
-                    <option value="ili9486_raw">Generic ILI9486 / XPT2046</option>
-                    <option value="st7796s">3.5&quot; IPS ST7796S SPI</option>
-                  </select>
-                </div>
-
-                {config.mode === 'fb' ? (
-                  <div>
-                    <label className="block text-slate-400 mb-1">Linux Framebuffer Node</label>
-                    <select
-                      value={config.fbDevice}
-                      onChange={(e) => setConfig((c) => ({ ...c, fbDevice: e.target.value }))}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-sky-500"
-                    >
-                      <option value="/dev/fb1">/dev/fb1 (SPI Secondary LCD)</option>
-                      <option value="/dev/fb0">/dev/fb0 (Primary Framebuffer)</option>
-                    </select>
-                  </div>
-                ) : (
-                  <div>
-                    <label className="block text-slate-400 mb-1">BCM GPIO Pins (DC / RST)</label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <input
-                        type="number"
-                        value={config.dcPin}
-                        onChange={(e) =>
-                          setConfig((c) => ({ ...c, dcPin: Number(e.target.value) || 24 }))
-                        }
-                        className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 font-mono text-slate-100 tabular-nums"
-                        title="DC BCM GPIO Pin"
-                      />
-                      <input
-                        type="number"
-                        value={config.rstPin}
-                        onChange={(e) =>
-                          setConfig((c) => ({ ...c, rstPin: Number(e.target.value) || 25 }))
-                        }
-                        className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 font-mono text-slate-100 tabular-nums"
-                        title="RST BCM GPIO Pin"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                <div>
                   <label className="block text-slate-400 mb-1">SPI Clock Speed (Hz)</label>
                   <select
                     value={config.spiSpeedHz}
@@ -362,11 +320,11 @@ git push -u origin main`;
                     }
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 tabular-nums focus:outline-none focus:border-sky-500"
                   >
-                    <option value={16000000}>16 MHz (16,000,000 Hz - Safe)</option>
-                    <option value={24000000}>24 MHz (24,000,000 Hz - Balanced)</option>
-                    <option value={32000000}>32 MHz (32,000,000 Hz - Standard)</option>
-                    <option value={48000000}>48 MHz (48,000,000 Hz - High Speed)</option>
-                    <option value={64000000}>64 MHz (64,000,000 Hz - Overclock)</option>
+                    <option value={16000000}>16 MHz (Safe)</option>
+                    <option value={24000000}>24 MHz (Balanced)</option>
+                    <option value={32000000}>32 MHz (Standard)</option>
+                    <option value={48000000}>48 MHz (High Speed)</option>
+                    <option value={64000000}>64 MHz (Max)</option>
                   </select>
                 </div>
 
@@ -382,48 +340,51 @@ git push -u origin main`;
                     }
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-sky-500"
                   >
-                    <option value="auto">Auto (Picamera2 → OpenCV V4L2)</option>
-                    <option value="picamera2">Picamera2 (CSI Ribbon Camera)</option>
-                    <option value="opencv">OpenCV V4L2 (/dev/video0 USB)</option>
+                    <option value="auto">Auto (Picamera2 → OpenCV)</option>
+                    <option value="picamera2">Picamera2 (CSI Ribbon)</option>
+                    <option value="opencv">OpenCV V4L2 (/dev/video0)</option>
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-slate-400 mb-1">Target FPS &amp; Rotation</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <select
-                      value={config.targetFps}
-                      onChange={(e) =>
-                        setConfig((c) => ({ ...c, targetFps: Number(e.target.value) }))
-                      }
-                      className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-2 font-mono text-slate-100 tabular-nums"
-                    >
-                      <option value={15}>15 FPS</option>
-                      <option value={24}>24 FPS</option>
-                      <option value={30}>30 FPS</option>
-                      <option value={45}>45 FPS</option>
-                    </select>
-                    <select
-                      value={config.rotation}
-                      onChange={(e) =>
-                        setConfig((c) => ({
-                          ...c,
-                          rotation: Number(e.target.value) as StreamConfig['rotation'],
-                        }))
-                      }
-                      className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-2 font-mono text-slate-100 tabular-nums"
-                    >
-                      <option value={0}>0°</option>
-                      <option value={90}>90°</option>
-                      <option value={180}>180°</option>
-                      <option value={270}>270°</option>
-                    </select>
-                  </div>
+                  <label className="block text-slate-400 mb-1">Palm Detection Confidence</label>
+                  <select
+                    value={config.minDetectionConf}
+                    onChange={(e) =>
+                      setConfig((c) => ({ ...c, minDetectionConf: Number(e.target.value) }))
+                    }
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 tabular-nums focus:outline-none focus:border-sky-500"
+                  >
+                    <option value={0.5}>0.50 (Fast / Sensitive)</option>
+                    <option value={0.65}>0.65 (Recommended)</option>
+                    <option value={0.8}>0.80 (Strict Precision)</option>
+                  </select>
                 </div>
               </div>
 
-              {/* Checkboxes for HUD, Mirroring, Systemd */}
               <div className="flex flex-wrap items-center gap-4 mt-4 pt-3 border-t border-slate-800/80 text-xs text-slate-300">
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={config.gestureEnabled}
+                    onChange={(e) =>
+                      setConfig((c) => ({ ...c, gestureEnabled: e.target.checked }))
+                    }
+                    className="rounded border-slate-700 bg-slate-950 text-sky-500"
+                  />
+                  <span>Enable 21-Pt Palm Reader (--gesture)</span>
+                </label>
+
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={config.ttsEnabled}
+                    onChange={(e) => setConfig((c) => ({ ...c, ttsEnabled: e.target.checked }))}
+                    className="rounded border-slate-700 bg-slate-950 text-sky-500"
+                  />
+                  <span>Voice TTS Output (--tts)</span>
+                </label>
+
                 <label className="inline-flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
@@ -431,7 +392,7 @@ git push -u origin main`;
                     onChange={(e) => setConfig((c) => ({ ...c, hud: e.target.checked }))}
                     className="rounded border-slate-700 bg-slate-950 text-sky-500"
                   />
-                  <span>Draw Telemetry HUD</span>
+                  <span>HUD Telemetry Bar</span>
                 </label>
 
                 <label className="inline-flex items-center gap-2 cursor-pointer">
@@ -441,75 +402,86 @@ git push -u origin main`;
                     onChange={(e) => setConfig((c) => ({ ...c, flipH: e.target.checked }))}
                     className="rounded border-slate-700 bg-slate-950 text-sky-500"
                   />
-                  <span>Mirror Horizontal</span>
-                </label>
-
-                <label className="inline-flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={config.flipV}
-                    onChange={(e) => setConfig((c) => ({ ...c, flipV: e.target.checked }))}
-                    className="rounded border-slate-700 bg-slate-950 text-sky-500"
-                  />
-                  <span>Flip Vertical</span>
-                </label>
-
-                <label className="inline-flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={config.enableSystemd}
-                    onChange={(e) =>
-                      setConfig((c) => ({ ...c, enableSystemd: e.target.checked }))
-                    }
-                    className="rounded border-slate-700 bg-slate-950 text-sky-500"
-                  />
-                  <span>Systemd Auto-Boot</span>
+                  <span>Mirror Selfie (--flip-h)</span>
                 </label>
               </div>
             </div>
 
             <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
               <span>{syncState.message}</span>
-              <button
-                type="button"
-                onClick={() => setConfig(DEFAULT_CONFIG)}
-                className="text-slate-400 hover:text-slate-200 underline whitespace-nowrap shrink-0"
+              <a
+                href="/api/raw/simulation.html"
+                target="_blank"
+                rel="noreferrer"
+                className="text-sky-400 hover:underline whitespace-nowrap shrink-0"
               >
-                Reset Defaults
-              </button>
+                Open Standalone simulation.html ↗
+              </a>
             </div>
           </div>
         </section>
 
-        {/* Section 2: Interactive 3.5" SPI Display Hardware Simulator & Code Viewer */}
+        {/* Section 2: Interactive 3.5" SPI Display Simulator & Multi-File Code Inspector */}
         <section id="simulator" className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           <div className="lg:col-span-6">
             <SpiDisplaySimulator config={config} />
           </div>
 
-          {/* Code & README Inspector */}
+          {/* Code, Simulation HTML, GitHub Action & Reusable Prompt Viewer */}
           <div
             id="code-files"
             className="lg:col-span-6 border border-slate-800 bg-slate-900/70 rounded-xl overflow-hidden flex flex-col"
           >
-            <div className="px-5 py-3.5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
-              {/* Segmented File Selector */}
-              <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-lg">
+            <div className="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-lg">
                 <button
                   type="button"
                   onClick={() => setActiveTab('python')}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
                     activeTab === 'python'
                       ? 'bg-sky-600 text-white'
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  rpi_camera_spi_stream.py
+                  Python Gesture Code
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('simulation')}
+                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                    activeTab === 'simulation'
+                      ? 'bg-sky-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  simulation.html
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('workflow')}
+                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                    activeTab === 'workflow'
+                      ? 'bg-sky-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  GitHub Action
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('prompt')}
+                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                    activeTab === 'prompt'
+                      ? 'bg-sky-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  AI Prompt
                 </button>
                 <button
                   type="button"
                   onClick={() => setActiveTab('readme')}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
                     activeTab === 'readme'
                       ? 'bg-sky-600 text-white'
                       : 'text-slate-400 hover:text-slate-200'
@@ -517,24 +489,13 @@ git push -u origin main`;
                 >
                   README.md
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('install')}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                    activeTab === 'install'
-                      ? 'bg-sky-600 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  install_rpi.sh
-                </button>
               </div>
 
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => handleCopy('code-viewer', currentFileContent)}
-                  className="px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  className="px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
                 >
                   {copiedId === 'code-viewer' ? (
                     <>
@@ -544,7 +505,7 @@ git push -u origin main`;
                   ) : (
                     <>
                       <Copy className="w-3.5 h-3.5" />
-                      Copy File
+                      Copy
                     </>
                   )}
                 </button>
@@ -552,7 +513,7 @@ git push -u origin main`;
                 <button
                   type="button"
                   onClick={() => handleDownload(currentFileName, currentFileContent)}
-                  className="px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  className="px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Save {currentFileName}
@@ -560,8 +521,8 @@ git push -u origin main`;
               </div>
             </div>
 
-            <div className="p-4 bg-slate-950 overflow-auto max-h-[540px]">
-              <pre className="text-xs font-mono text-slate-200 leading-relaxed whitespace-pre">
+            <div className="p-4 bg-slate-950 overflow-auto max-h-[600px]">
+              <pre className="text-xs font-mono text-slate-200 leading-relaxed whitespace-pre-wrap">
                 {currentFileContent}
               </pre>
             </div>
@@ -576,10 +537,10 @@ git push -u origin main`;
           <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
             <div>
               <h2 className="text-lg font-semibold text-slate-100 font-display">
-                Build, Push to Git &amp; Direct Clone on Raspberry Pi
+                Push to GitHub &amp; Direct Clone on Raspberry Pi
               </h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                Set your Git repository URL and Raspberry Pi SSH target to generate ready-to-run push and clone commands
+                Includes Python Palm Reader, <code className="text-slate-300">simulation.html</code>, and <code className="text-slate-300">.github/workflows/rpi-gesture-ci.yml</code>
               </p>
             </div>
 
@@ -593,28 +554,17 @@ git push -u origin main`;
                   className="w-72 sm:w-80 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 font-mono text-slate-100 focus:outline-none focus:border-sky-500"
                 />
               </div>
-
-              <div className="flex items-center gap-2">
-                <label className="text-slate-400 whitespace-nowrap">RPi Host:</label>
-                <input
-                  type="text"
-                  value={config.rpiHost}
-                  onChange={(e) => setConfig((c) => ({ ...c, rpiHost: e.target.value }))}
-                  className="w-36 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 font-mono text-slate-100 focus:outline-none focus:border-sky-500"
-                />
-              </div>
             </div>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Step 1: Build & Push Code to Remote Repository */}
             <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
               <div>
                 <div className="flex items-center justify-between gap-2 mb-3">
                   <div className="flex items-center gap-2">
                     <GitBranch className="w-4 h-4 text-sky-400" />
                     <h3 className="text-sm font-semibold text-slate-100">
-                      01. Build &amp; Push Code to Git Repository
+                      01. Commit &amp; Push Code + GitHub Action to Repository
                     </h3>
                   </div>
                   <button
@@ -635,18 +585,12 @@ git push -u origin main`;
                     )}
                   </button>
                 </div>
-                <p className="text-xs text-slate-400 mb-3">
-                  Stages <code className="text-slate-200">rpi_camera_spi_stream.py</code>,{' '}
-                  <code className="text-slate-200">install_rpi.sh</code>, and{' '}
-                  <code className="text-slate-200">README.md</code> and pushes them to your remote Git repository.
-                </p>
                 <pre className="text-xs font-mono text-sky-300 overflow-x-auto leading-relaxed">
                   {gitPushBlock}
                 </pre>
               </div>
             </div>
 
-            {/* Step 2: Clone & Run Directly on Raspberry Pi */}
             <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
               <div>
                 <div className="flex items-center justify-between gap-2 mb-3">
@@ -679,9 +623,6 @@ git push -u origin main`;
                     )}
                   </button>
                 </div>
-                <p className="text-xs text-slate-400 mb-3">
-                  Run directly inside your Raspberry Pi terminal to clone the repo, configure SPI, and stream camera frames to the 3.5&quot; display:
-                </p>
                 <pre className="text-xs font-mono text-emerald-300 overflow-x-auto leading-relaxed">
 {`git clone ${config.gitRepoUrl}
 cd ${repoFolder}
@@ -699,23 +640,26 @@ ${directRunCommand}`}
         </section>
       </main>
 
-      {/* Quiet Footer */}
       <footer className="border-t border-slate-800/80 py-5 px-6 text-xs text-slate-500">
         <div className="max-w-[1380px] mx-auto flex flex-wrap items-center justify-between gap-4">
           <span>
-            Raspberry Pi 3.5&quot; SPI Display Camera Streamer · Supports Picamera2 CSI &amp; OpenCV V4L2 in 16-bit RGB565
+            Raspberry Pi 3.5&quot; SPI Camera Streamer + MediaPipe 21-Point Hand Gesture &amp; Palm Reader
           </span>
           <div className="flex items-center gap-4">
             <a href="/api/raw/rpi_camera_spi_stream.py" target="_blank" rel="noreferrer" className="hover:text-slate-300">
-              Raw Python Script
+              rpi_camera_spi_stream.py
             </a>
             <span aria-hidden="true">·</span>
-            <a href="/api/raw/install_rpi.sh" target="_blank" rel="noreferrer" className="hover:text-slate-300">
-              Raw Installer Script
+            <a href="/api/raw/simulation.html" target="_blank" rel="noreferrer" className="hover:text-slate-300">
+              simulation.html
+            </a>
+            <span aria-hidden="true">·</span>
+            <a href="/api/raw/rpi-gesture-ci.yml" target="_blank" rel="noreferrer" className="hover:text-slate-300">
+              rpi-gesture-ci.yml
             </a>
             <span aria-hidden="true">·</span>
             <a href="/api/raw/README.md" target="_blank" rel="noreferrer" className="hover:text-slate-300">
-              Raw README.md
+              README.md
             </a>
           </div>
         </div>

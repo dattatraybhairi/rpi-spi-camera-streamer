@@ -5,9 +5,11 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import {
   DEFAULT_CONFIG,
+  generateGithubActionYaml,
   generateInstallScript,
   generatePythonScript,
   generateReadmeMarkdown,
+  generateSimulationHtml,
   StreamConfig,
 } from './src/data/rpiTemplates.ts';
 
@@ -20,18 +22,25 @@ async function startServer() {
 
   app.use(express.json({ limit: '2mb' }));
 
-  // Sync generated Python script, install_rpi.sh, and README.md directly to workspace disk
+  // Sync generated Python script, simulation.html, GitHub workflow, install_rpi.sh, and README.md to disk
   app.post('/api/sync-files', async (req, res) => {
     try {
       const config: StreamConfig = { ...DEFAULT_CONFIG, ...(req.body?.config || {}) };
       const pythonCode = generatePythonScript(config);
       const installSh = generateInstallScript(config);
       const readmeMd = generateReadmeMarkdown(config);
+      const simHtml = generateSimulationHtml(config);
+      const workflowYaml = generateGithubActionYaml(config);
+
+      const workflowDir = path.join(__dirname, '.github', 'workflows');
+      await fs.mkdir(workflowDir, { recursive: true });
 
       await Promise.all([
         fs.writeFile(path.join(__dirname, 'rpi_camera_spi_stream.py'), pythonCode, 'utf-8'),
         fs.writeFile(path.join(__dirname, 'install_rpi.sh'), installSh, 'utf-8'),
         fs.writeFile(path.join(__dirname, 'README.md'), readmeMd, 'utf-8'),
+        fs.writeFile(path.join(__dirname, 'simulation.html'), simHtml, 'utf-8'),
+        fs.writeFile(path.join(workflowDir, 'rpi-gesture-ci.yml'), workflowYaml, 'utf-8'),
       ]);
 
       res.json({
@@ -39,6 +48,8 @@ async function startServer() {
         updatedAt: new Date().toISOString(),
         files: [
           { name: 'rpi_camera_spi_stream.py', bytes: Buffer.byteLength(pythonCode, 'utf-8') },
+          { name: 'simulation.html', bytes: Buffer.byteLength(simHtml, 'utf-8') },
+          { name: '.github/workflows/rpi-gesture-ci.yml', bytes: Buffer.byteLength(workflowYaml, 'utf-8') },
           { name: 'install_rpi.sh', bytes: Buffer.byteLength(installSh, 'utf-8') },
           { name: 'README.md', bytes: Buffer.byteLength(readmeMd, 'utf-8') },
         ],
@@ -53,15 +64,24 @@ async function startServer() {
 
   // Serve raw files for direct curl/wget download onto Raspberry Pi
   app.get('/api/raw/:filename', async (req, res) => {
-    const allowed = new Set(['rpi_camera_spi_stream.py', 'install_rpi.sh', 'README.md']);
-    const { filename } = req.params;
-    if (!allowed.has(filename)) {
+    const allowed: Record<string, string> = {
+      'rpi_camera_spi_stream.py': path.join(__dirname, 'rpi_camera_spi_stream.py'),
+      'install_rpi.sh': path.join(__dirname, 'install_rpi.sh'),
+      'README.md': path.join(__dirname, 'README.md'),
+      'simulation.html': path.join(__dirname, 'simulation.html'),
+      'rpi-gesture-ci.yml': path.join(__dirname, '.github', 'workflows', 'rpi-gesture-ci.yml'),
+    };
+    const targetPath = allowed[req.params.filename];
+    if (!targetPath) {
       res.status(404).send('File not found');
       return;
     }
     try {
-      const content = await fs.readFile(path.join(__dirname, filename), 'utf-8');
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      const content = await fs.readFile(targetPath, 'utf-8');
+      res.setHeader(
+        'Content-Type',
+        req.params.filename.endsWith('.html') ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8'
+      );
       res.send(content);
     } catch {
       res.status(404).send('File not found');

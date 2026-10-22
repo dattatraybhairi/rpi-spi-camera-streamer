@@ -1,10 +1,93 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, RefreshCw, Video, VideoOff } from 'lucide-react';
+import { RefreshCw, Video, VideoOff, Volume2, VolumeX } from 'lucide-react';
 import { StreamConfig } from '../data/rpiTemplates';
 
 interface SpiDisplaySimulatorProps {
   config: StreamConfig;
 }
+
+export interface HandGesturePreset {
+  id: string;
+  buttonLabel: string;
+  hudBanner: string;
+  spokenText: string;
+  fingers: [number, number, number, number, number]; // [Thumb, Index, Middle, Ring, Pinky]
+  pinch?: boolean;
+}
+
+export const HAND_GESTURE_PRESETS: HandGesturePreset[] = [
+  {
+    id: 'CLOSED_HAND',
+    buttonLabel: 'Closed Hand (0)',
+    hudBanner: 'CLOSED HAND (FIST - 0)',
+    spokenText: 'Closed Hand',
+    fingers: [0, 0, 0, 0, 0],
+  },
+  {
+    id: '1',
+    buttonLabel: '1 Finger',
+    hudBanner: '1 - ONE FINGER',
+    spokenText: 'One',
+    fingers: [0, 1, 0, 0, 0],
+  },
+  {
+    id: '2',
+    buttonLabel: '2 Fingers',
+    hudBanner: '2 - TWO FINGERS',
+    spokenText: 'Two',
+    fingers: [0, 1, 1, 0, 0],
+  },
+  {
+    id: '3',
+    buttonLabel: '3 Fingers',
+    hudBanner: '3 - THREE FINGERS',
+    spokenText: 'Three',
+    fingers: [0, 1, 1, 1, 0],
+  },
+  {
+    id: '4',
+    buttonLabel: '4 Fingers',
+    hudBanner: '4 - FOUR FINGERS',
+    spokenText: 'Four',
+    fingers: [0, 1, 1, 1, 1],
+  },
+  {
+    id: '5',
+    buttonLabel: '5 Open Palm',
+    hudBanner: '5 - OPEN PALM (ALL 5)',
+    spokenText: 'Five',
+    fingers: [1, 1, 1, 1, 1],
+  },
+  {
+    id: 'THUMB_UP',
+    buttonLabel: 'Thumb OK',
+    hudBanner: 'THUMB OK / THUMBS UP',
+    spokenText: 'Thumb OK',
+    fingers: [1, 0, 0, 0, 0],
+  },
+  {
+    id: 'OK',
+    buttonLabel: 'OK Sign',
+    hudBanner: 'OK SIGN (Thumb+Index)',
+    spokenText: 'OK',
+    fingers: [1, 0, 1, 1, 1],
+    pinch: true,
+  },
+  {
+    id: 'ROCK',
+    buttonLabel: 'Rock On',
+    hudBanner: 'ROCK ON (Index+Pinky)',
+    spokenText: 'Rock On',
+    fingers: [0, 1, 0, 0, 1],
+  },
+  {
+    id: 'CALL_ME',
+    buttonLabel: 'Call Me',
+    hudBanner: 'CALL ME (Thumb+Pinky)',
+    spokenText: 'Call Me',
+    fingers: [1, 0, 0, 0, 1],
+  },
+];
 
 export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -14,14 +97,47 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
   const [measuredFps, setMeasuredFps] = useState<number>(config.targetFps);
   const [rgb565Quantize, setRgb565Quantize] = useState<boolean>(true);
   const [touchPoint, setTouchPoint] = useState<{ x: number; y: number } | null>(null);
+  const [activeGesture, setActiveGesture] = useState<HandGesturePreset>(HAND_GESTURE_PRESETS[5]);
+  const [autoCycleGestures, setAutoCycleGestures] = useState<boolean>(false);
+  const [browserVoiceTts, setBrowserVoiceTts] = useState<boolean>(config.ttsEnabled);
 
-  // Calculate theoretical SPI bus ceiling FPS:
-  // Frame size = width * height * 16 bits. Effective SPI DMA efficiency ~82%
   const frameBits = config.width * config.height * 16;
   const maxSpiBusFps = Math.min(60, Math.round((config.spiSpeedHz * 0.82) / frameBits));
   const effectiveTargetFps = Math.min(config.targetFps, maxSpiBusFps);
   const frameSizeKb = ((config.width * config.height * 2) / 1024).toFixed(0);
   const throughputMbps = ((effectiveTargetFps * frameBits) / 1_000_000).toFixed(2);
+
+  const speakGesture = (phrase: string) => {
+    if (!browserVoiceTts || typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      return;
+    }
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(phrase);
+      utterance.rate = 1.05;
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      // Ignore speech synthesis errors on restricted browsers
+    }
+  };
+
+  const handleSelectGesture = (preset: HandGesturePreset) => {
+    setActiveGesture(preset);
+    speakGesture(preset.spokenText);
+  };
+
+  useEffect(() => {
+    if (!autoCycleGestures) return;
+    const interval = setInterval(() => {
+      setActiveGesture((prev) => {
+        const idx = HAND_GESTURE_PRESETS.findIndex((p) => p.id === prev.id);
+        const next = HAND_GESTURE_PRESETS[(idx + 1) % HAND_GESTURE_PRESETS.length];
+        speakGesture(next.spokenText);
+        return next;
+      });
+    }, 2200);
+    return () => clearInterval(interval);
+  }, [autoCycleGestures, browserVoiceTts]);
 
   useEffect(() => {
     let stream: MediaStream | null = null;
@@ -44,7 +160,7 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
           setWebcamError(
             err instanceof Error
               ? err.message
-              : 'Camera permission denied or unavailable. Running synthetic CSI test feed.'
+              : 'Camera permission denied or unavailable. Running synthetic CSI + Palm Reader feed.'
           );
           setUseWebcam(false);
         });
@@ -92,7 +208,6 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
       const h = config.height;
 
       ctx.save();
-      // Apply software rotation / mirror inside canvas coordinate space
       ctx.translate(w / 2, h / 2);
       if (config.rotation !== 0) {
         ctx.rotate((config.rotation * Math.PI) / 180);
@@ -103,7 +218,6 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
       if (useWebcam && videoRef.current && videoRef.current.readyState >= 2) {
         ctx.drawImage(videoRef.current, 0, 0, w, h);
       } else {
-        // Synthetic Raspberry Pi Camera Module v3 optical test target
         const t = now * 0.0012;
         const grad = ctx.createLinearGradient(0, 0, w, h);
         grad.addColorStop(0, '#0f172a');
@@ -112,11 +226,10 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, w, h);
 
-        // Moving calibration grid
-        ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.14)';
         ctx.lineWidth = 1;
         const step = 32;
-        const offsetX = (t * 24) % step;
+        const offsetX = (t * 20) % step;
         for (let x = offsetX; x < w; x += step) {
           ctx.beginPath();
           ctx.moveTo(x, 0);
@@ -129,48 +242,114 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
           ctx.lineTo(w, y);
           ctx.stroke();
         }
+      }
 
-        // SMPTE-style RGB565 color calibration bars at bottom
-        const barColors = ['#ef4444', '#f59e0b', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#a855f7', '#f8fafc'];
-        const barWidth = w / barColors.length;
-        barColors.forEach((col, idx) => {
-          ctx.fillStyle = col;
-          ctx.fillRect(idx * barWidth, h - 34, barWidth + 1, 34);
+      // Draw 21-point MediaPipe Hand Skeleton & Palm Reader overlay when gestureEnabled
+      if (config.gestureEnabled) {
+        const cx = w * 0.5 + Math.sin(now * 0.0022) * 8;
+        const cy = h * 0.58 + Math.cos(now * 0.0018) * 5;
+        const wrist: [number, number] = [cx, cy + 56];
+
+        // 5 MCP knuckles [Thumb, Index, Middle, Ring, Pinky]
+        const mcps: [number, number][] = [
+          [cx - 48, cy + 16],
+          [cx - 28, cy - 18],
+          [cx - 6, cy - 24],
+          [cx + 16, cy - 20],
+          [cx + 36, cy - 10],
+        ];
+
+        // Palm knuckle web lines
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.7)';
+        ctx.lineWidth = 1.5;
+        for (let i = 0; i < mcps.length - 1; i++) {
+          ctx.beginPath();
+          ctx.moveTo(mcps[i][0], mcps[i][1]);
+          ctx.lineTo(mcps[i + 1][0], mcps[i + 1][1]);
+          ctx.stroke();
+        }
+
+        // Draw each finger's 4 bones & joints
+        mcps.forEach((mcp, idx) => {
+          const isExtended = activeGesture.fingers[idx] === 1;
+          let tipX = mcp[0] + (idx === 0 ? (isExtended ? -38 : -8) : (idx - 2) * 7);
+          let tipY = mcp[1] + (isExtended ? -66 : 20);
+
+          if (activeGesture.id === 'THUMB_UP' && idx === 0) {
+            tipX = mcp[0] - 12;
+            tipY = mcp[1] - 68;
+          }
+
+          if (activeGesture.pinch && (idx === 0 || idx === 1)) {
+            tipX = cx - 32;
+            tipY = cy - 42;
+          }
+
+          const midX = (mcp[0] + tipX) / 2;
+          const midY = (mcp[1] + tipY) / 2;
+
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(wrist[0], wrist[1]);
+          ctx.lineTo(mcp[0], mcp[1]);
+          ctx.lineTo(midX, midY);
+          ctx.lineTo(tipX, tipY);
+          ctx.stroke();
+
+          // Knuckle and PIP joints
+          ctx.fillStyle = '#f8fafc';
+          ctx.beginPath();
+          ctx.arc(mcp[0], mcp[1], 3.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(midX, midY, 3, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Fingertip landmark (Green = extended, Rose = curled)
+          ctx.fillStyle = isExtended ? '#4ade80' : '#f43f5e';
+          ctx.beginPath();
+          ctx.arc(tipX, tipY, 5.5, 0, Math.PI * 2);
+          ctx.fill();
         });
 
-        // Animated tracked target box simulating object inspection on RPi CSI feed
-        const targetX = w * 0.5 + Math.cos(t * 1.3) * (w * 0.24);
-        const targetY = h * 0.45 + Math.sin(t * 1.9) * (h * 0.18);
+        // Wrist landmark 0
+        ctx.fillStyle = '#f8fafc';
+        ctx.beginPath();
+        ctx.arc(wrist[0], wrist[1], 4.5, 0, Math.PI * 2);
+        ctx.fill();
 
-        ctx.strokeStyle = '#38bdf8';
+        // Biometric Palm Reader Center Ring
+        const palmX = cx - 4;
+        const palmY = cy + 6;
+        ctx.strokeStyle = '#facc15';
         ctx.lineWidth = 1.5;
-        ctx.strokeRect(targetX - 36, targetY - 28, 72, 56);
+        ctx.beginPath();
+        ctx.arc(palmX, palmY, 18, 0, Math.PI * 2);
+        ctx.stroke();
 
-        ctx.fillStyle = '#38bdf8';
-        ctx.font = '10px "JetBrains Mono", monospace';
-        ctx.fillText(
-          `CSI_OBJ (${Math.round(targetX)},${Math.round(targetY)})`,
-          targetX - 36,
-          targetY - 33
-        );
+        ctx.fillStyle = '#facc15';
+        ctx.beginPath();
+        ctx.arc(palmX, palmY, 3, 0, Math.PI * 2);
+        ctx.fill();
       }
+
       ctx.restore();
 
-      // Simulate true 16-bit RGB565 bit-truncation ((R & 0xF8), (G & 0xFC), (B & 0xF8))
+      // Simulate 16-bit RGB565 quantization
       if (rgb565Quantize) {
         const imgData = ctx.getImageData(0, 0, w, h);
         const data = imgData.data;
         for (let i = 0; i < data.length; i += 4) {
-          data[i] = data[i] & 0xf8;     // 5-bit Red
-          data[i + 1] = data[i + 1] & 0xfc; // 6-bit Green
-          data[i + 2] = data[i + 2] & 0xf8; // 5-bit Blue
+          data[i] = data[i] & 0xf8;
+          data[i + 1] = data[i + 1] & 0xfc;
+          data[i + 2] = data[i + 2] & 0xf8;
         }
         ctx.putImageData(imgData, 0, 0);
       }
 
-      // Draw HUD overlay matching rpi_camera_spi_stream.py draw_hud()
       if (config.hud) {
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.78)';
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.82)';
         ctx.fillRect(0, 0, w, 26);
 
         ctx.font = '11px "JetBrains Mono", monospace';
@@ -185,24 +364,23 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
         ctx.fillText(`${smoothedFps.toFixed(1)} FPS | 47.2C | ${timeStr}`, w - 8, 17);
         ctx.textAlign = 'left';
 
-        // Center optical reticle
-        const cx = Math.floor(w / 2);
-        const cy = Math.floor(h / 2);
-        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(cx - 12, cy);
-        ctx.lineTo(cx - 4, cy);
-        ctx.moveTo(cx + 4, cy);
-        ctx.lineTo(cx + 12, cy);
-        ctx.moveTo(cx, cy - 12);
-        ctx.lineTo(cx, cy - 4);
-        ctx.moveTo(cx, cy + 4);
-        ctx.lineTo(cx, cy + 12);
-        ctx.stroke();
+        if (config.gestureEnabled) {
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.86)';
+          ctx.fillRect(0, h - 34, w, 34);
+
+          ctx.font = 'bold 12px "JetBrains Mono", monospace';
+          ctx.fillStyle = '#4ade80';
+          ctx.fillText(`PALM READER: ${activeGesture.hudBanner}`, 10, h - 12);
+
+          const upCount = activeGesture.fingers.reduce((a, b) => a + b, 0);
+          ctx.font = '11px "JetBrains Mono", monospace';
+          ctx.fillStyle = '#38bdf8';
+          ctx.textAlign = 'right';
+          ctx.fillText(`SPEAK: "${activeGesture.spokenText}" | UP: ${upCount}/5`, w - 10, h - 12);
+          ctx.textAlign = 'left';
+        }
       }
 
-      // Render resistive XPT2046 touch coordinate probe if user clicked screen
       if (touchPoint) {
         ctx.strokeStyle = '#f59e0b';
         ctx.lineWidth = 1.5;
@@ -228,6 +406,7 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
     config.flipH,
     config.flipV,
     config.hud,
+    config.gestureEnabled,
     config.mode,
     config.fbDevice,
     config.spiBus,
@@ -236,6 +415,7 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
     rgb565Quantize,
     useWebcam,
     touchPoint,
+    activeGesture,
   ]);
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -252,28 +432,29 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
       <div className="flex flex-wrap items-center justify-between gap-4 pb-4 mb-4 border-b border-slate-800">
         <div>
           <h2 className="text-base font-semibold text-slate-100">
-            3.5&quot; SPI Hardware Display Preview ({config.width}×{config.height} RGB565)
+            3.5&quot; SPI Display &amp; Hand Palm Gesture Simulator ({config.width}×{config.height} RGB565)
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            <span>{config.displayModel.toUpperCase()}</span>
+            <span>21-Point MediaPipe Skeleton</span>
             <span className="mx-1.5" aria-hidden="true">·</span>
-            <span>{config.mode === 'fb' ? `Framebuffer ${config.fbDevice}` : `Raw SPI0 CE${config.spiCs}`}</span>
+            <span>Spoken Output: &quot;{activeGesture.spokenText}&quot;</span>
             <span className="mx-1.5" aria-hidden="true">·</span>
-            <span>Click LCD surface to test XPT2046 touch coordinates</span>
+            <span>Finger Bitmask: [{activeGesture.fingers.join(', ')}]</span>
           </p>
         </div>
 
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setRgb565Quantize((prev) => !prev)}
-            className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
-              rgb565Quantize
-                ? 'bg-slate-800 text-slate-100 border-slate-700'
-                : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200'
+            onClick={() => setBrowserVoiceTts((prev) => !prev)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
+              browserVoiceTts
+                ? 'bg-emerald-950/60 text-emerald-300 border-emerald-700/70'
+                : 'bg-slate-950 text-slate-400 border-slate-800'
             }`}
           >
-            16-Bit RGB565: {rgb565Quantize ? 'Active' : 'Bypass'}
+            {browserVoiceTts ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+            Voice TTS: {browserVoiceTts ? 'On' : 'Muted'}
           </button>
 
           <button
@@ -307,11 +488,10 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
       <video ref={videoRef} className="hidden" playsInline muted />
 
       {/* Physical 3.5-inch Raspberry Pi SPI Hat PCB Casing */}
-      <div className="flex flex-col items-center justify-center py-3">
+      <div className="flex flex-col items-center justify-center py-2">
         <div className="relative bg-slate-950 border-2 border-slate-700 rounded-xl p-4 shadow-inner max-w-full">
-          {/* Top silk-screen markings */}
           <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 mb-2 px-1">
-            <span>RPi 3.5&quot; TFT LCD HAT (ILI9486 / XPT2046)</span>
+            <span>RPi 3.5&quot; TFT LCD HAT (ILI9486 + MediaPipe Hands)</span>
             <span className="tabular-nums">
               SPI SCLK: {(config.spiSpeedHz / 1_000_000).toFixed(0)}MHz · {frameSizeKb}KB/frame
             </span>
@@ -325,10 +505,9 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
             className="w-full max-w-[480px] aspect-[3/2] rounded border border-slate-800 cursor-crosshair bg-black block"
           />
 
-          {/* Bottom silk-screen markings */}
           <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 mt-2 px-1">
             <span>
-              GPIO DC:{config.dcPin} · RST:{config.rstPin} · CS:CE{config.spiCs}
+              Gesture: {activeGesture.hudBanner}
             </span>
             {touchPoint ? (
               <button
@@ -340,9 +519,52 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
                 Clear Touch ({touchPoint.x}, {touchPoint.y})
               </button>
             ) : (
-              <span>Source: {useWebcam ? 'Live Local Camera' : 'Synthetic CSI Pattern'}</span>
+              <button
+                type="button"
+                onClick={() => setRgb565Quantize((p) => !p)}
+                className="text-sky-400 hover:underline whitespace-nowrap shrink-0"
+              >
+                RGB565 Quantize: {rgb565Quantize ? 'ON' : 'OFF'}
+              </button>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Interactive Hand & Palm Gesture Preset Selector */}
+      <div className="mt-4 pt-4 border-t border-slate-800">
+        <div className="flex items-center justify-between gap-2 mb-2.5">
+          <span className="text-xs font-medium text-slate-300">
+            Test Hand &amp; Palm Gesture States (Click to Simulate &amp; Speak Aloud)
+          </span>
+          <button
+            type="button"
+            onClick={() => setAutoCycleGestures((prev) => !prev)}
+            className={`px-2.5 py-1 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 ${
+              autoCycleGestures
+                ? 'bg-sky-600 text-white border-sky-500'
+                : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200'
+            }`}
+          >
+            Auto-Cycle Gestures: {autoCycleGestures ? 'Running' : 'Off'}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          {HAND_GESTURE_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              onClick={() => handleSelectGesture(preset)}
+              className={`px-2.5 py-2 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 text-center ${
+                activeGesture.id === preset.id
+                  ? 'bg-sky-600 text-white border-sky-500'
+                  : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700'
+              }`}
+            >
+              {preset.buttonLabel}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -355,6 +577,16 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
           </span>
           <span className="text-[11px] text-slate-500 block tabular-nums">
             SPI Ceiling: {maxSpiBusFps} FPS @ {config.spiSpeedHz / 1_000_000} MHz
+          </span>
+        </div>
+
+        <div>
+          <span className="text-slate-400 block">Palm Reader Output</span>
+          <span className="font-mono text-sm font-semibold text-emerald-400 tabular-nums">
+            &quot;{activeGesture.spokenText}&quot;
+          </span>
+          <span className="text-[11px] text-slate-500 block tabular-nums">
+            Fingers Up: {activeGesture.fingers.reduce((a, b) => a + b, 0)} / 5
           </span>
         </div>
 
@@ -374,17 +606,7 @@ export const SpiDisplaySimulator: React.FC<SpiDisplaySimulatorProps> = ({ config
             {config.mode === 'fb' ? config.fbDevice : `/dev/spidev${config.spiBus}.${config.spiCs}`}
           </span>
           <span className="text-[11px] text-slate-500 block">
-            {config.mode === 'fb' ? 'Kernel DMA Framebuffer' : 'Userspace spidev + GPIO'}
-          </span>
-        </div>
-
-        <div>
-          <span className="text-slate-400 block">Camera Driver</span>
-          <span className="font-mono text-sm font-semibold text-slate-100">
-            {config.cameraBackend === 'auto' ? 'Picamera2 / V4L2' : config.cameraBackend}
-          </span>
-          <span className="text-[11px] text-slate-500 block tabular-nums">
-            Device Index: {config.cameraIndex} · Rot: {config.rotation}°
+            MediaPipe Lite + eSpeak TTS
           </span>
         </div>
       </div>
