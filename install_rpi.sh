@@ -21,11 +21,19 @@ sudo apt-get install -y \
   curl \
   git
 
-echo "==> [2/5] Installing MediaPipe & Downloading hand_landmarker.task model..."
-pip3 install --break-system-packages mediapipe || pip3 install mediapipe || echo "    [INFO] Using OpenCV YCrCb Convexity-Defect Palm Reader fallback."
-
-if [ ! -f "${REPO_DIR}/hand_landmarker.task" ]; then
-  curl -L -sS "${MODEL_URL}" -o "${REPO_DIR}/hand_landmarker.task" || true
+echo "==> [2/5] Checking Raspberry Pi CPU for ARMv8 Hardware AES support..."
+if grep -qiw "aes" /proc/cpuinfo 2>/dev/null; then
+  echo "    CPU supports hardware AES (Raspberry Pi 5). Installing MediaPipe..."
+  pip3 install --break-system-packages mediapipe || pip3 install mediapipe || true
+  if [ ! -f "${REPO_DIR}/hand_landmarker.task" ]; then
+    curl -L -sS "${MODEL_URL}" -o "${REPO_DIR}/hand_landmarker.task" || true
+  fi
+else
+  echo "    Raspberry Pi 3 / 4 / Zero 2W detected (no hardware AES in /proc/cpuinfo)."
+  echo "    Removing incompatible PyPI mediapipe/protobuf wheels that cause 'Illegal instruction'..."
+  pip3 uninstall -y --break-system-packages mediapipe protobuf 2>/dev/null || true
+  sudo apt-get install -y python3-protobuf || true
+  echo "    Configured ARM-Safe OpenCV YCrCb+HSV Hand & Palm Gesture Reader!"
 fi
 
 echo "==> [3/5] Verifying SPI interface in /boot/firmware/config.txt..."

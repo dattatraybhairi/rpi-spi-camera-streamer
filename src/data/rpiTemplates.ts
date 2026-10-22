@@ -136,26 +136,43 @@ try:
 except ImportError:
     HAS_RAW_SPI = False
 
+def cpu_supports_arm_aes() -> bool:
+    """Checks /proc/cpuinfo so RPi 3 / RPi 4 / Zero 2W never trigger MediaPipe SIGILL (Illegal instruction)."""
+    cpuinfo_path = Path("/proc/cpuinfo")
+    if not cpuinfo_path.exists():
+        return True
+    try:
+        text = cpuinfo_path.read_text(errors="ignore").lower()
+        if "aarch64" not in text and "armv" not in text and "raspberry pi" not in text:
+            return True
+        for line in text.splitlines():
+            if line.startswith("features") or line.startswith("flags"):
+                return "aes" in line.split(":", 1)[-1].strip().split()
+    except Exception:
+        return False
+    return False
+
+
 MP_SOLUTIONS_HANDS = None
 MP_TASKS_VISION = None
 MP_IMAGE_CLS = None
 MP_BASE_OPTIONS = None
+mp = None
 
-try:
-    import mediapipe as mp
-    if hasattr(mp, "solutions") and hasattr(mp.solutions, "hands"):
-        MP_SOLUTIONS_HANDS = mp.solutions.hands
-    else:
-        try:
+if cpu_supports_arm_aes():
+    try:
+        import mediapipe as _mp
+        mp = _mp
+        if hasattr(mp, "solutions") and hasattr(mp.solutions, "hands"):
+            MP_SOLUTIONS_HANDS = mp.solutions.hands
+        else:
             from mediapipe.tasks import python as mp_python
             from mediapipe.tasks.python import vision as mp_vision
             MP_TASKS_VISION = mp_vision
             MP_IMAGE_CLS = mp.Image
             MP_BASE_OPTIONS = mp_python.BaseOptions
-        except Exception:
-            pass
-except ImportError:
-    mp = None
+    except Exception:
+        mp = None
 
 HAND_LANDMARKER_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
